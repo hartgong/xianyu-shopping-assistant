@@ -78,7 +78,7 @@
                     <th>包邮</th>
                     <th><button class="sort-header" onclick="setProductSort('want')" id="sort-want" title="点击排序">想要</button></th>
                     <th><button class="sort-header" onclick="setProductSort('view')" id="sort-view" title="点击排序">浏览</button></th>
-                    <th><button class="sort-header" onclick="setProductSort('updated')" id="sort-updated" title="点击排序">更新</button></th>
+                    <th><button class="sort-header" onclick="setProductSort('updated')" id="sort-updated" title="点击排序">来过</button></th>
                     <th><button class="sort-header" onclick="setProductSort('seller')" id="sort-seller" title="点击排序">卖家</button></th>
                     <th><button class="sort-header" onclick="setProductSort('location')" id="sort-location" title="点击排序">地区</button></th>
                     <th><button class="sort-header" onclick="setProductSort('stage')" id="sort-stage" title="点击排序">阶段</button></th>
@@ -244,18 +244,14 @@
               <input id="f-price-max" type="number" placeholder="不限">
             </div>
             <div class="form-group">
-              <label>想要≤</label>
+              <label>想要不低于</label>
               <input id="f-want-max" type="number" min="0" placeholder="不限">
             </div>
           </div>
-          <div class="form-row">
+          <div class="form-row filter-text-row">
             <div class="form-group">
               <label>地区</label>
               <input id="f-region" type="text" placeholder="四川、成都">
-            </div>
-            <div class="form-group">
-              <label>标题包含</label>
-              <input id="f-title-include" type="text" placeholder="国行、原装">
             </div>
             <div class="form-group">
               <label>标题排除</label>
@@ -342,6 +338,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=24"></script>
+  <script src="app.js?v=27"></script>
 </body>
 </html>

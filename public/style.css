@@ -550,6 +550,9 @@ body {
 .task-form .form-section .form-group:last-child { margin-bottom: 0; }
 .task-form label { margin-bottom: 5px; }
 .compact-row .form-group { min-width: 0; }
+.filter-text-row .form-group { min-width: 0; }
+.filter-text-row .form-group:first-child { flex: .8; }
+.filter-text-row .form-group:last-child { flex: 2.2; }
 .inline-checks {
   display: flex;
   align-items: center;

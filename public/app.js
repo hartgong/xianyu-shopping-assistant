@@ -437,6 +437,7 @@ async function apiPut(url, body) {
 
 async function createTask() {
   const body = readTaskForm();
+  if (!body) return;
 
   if (!body.queries.length) {
     alert('请输入至少一个搜索关键词');
@@ -470,6 +471,12 @@ function readTaskForm() {
   const wantMax = document.getElementById('f-want-max').value;
   const maxPages = document.getElementById('f-pages').value;
   const queries = queriesRaw.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+  const wantMaxNumber = wantMax === '' ? null : Number(wantMax);
+
+  if (wantMaxNumber !== null && (!Number.isFinite(wantMaxNumber) || wantMaxNumber < 0)) {
+    alert('想要不低于不能填负数');
+    return null;
+  }
 
   return {
     name: name || queries[0],
@@ -480,8 +487,7 @@ function readTaskForm() {
     region: document.getElementById('f-region').value.trim(),
     personalSeller: document.getElementById('f-personal').checked,
     requireFreeShipping: document.getElementById('f-free-shipping').checked,
-    wantMax: wantMax ? Number(wantMax) : null,
-    titleInclude: document.getElementById('f-title-include').value.trim(),
+    wantMax: wantMaxNumber > 0 ? wantMaxNumber : null,
     titleExclude: document.getElementById('f-title-exclude').value.trim(),
     enableCoarseSemantic: document.getElementById('f-coarse-semantic').checked,
     customRequirements: document.getElementById('f-requirements').value.trim(),
@@ -574,7 +580,6 @@ function fillTaskForm(task, nameOverride) {
   document.getElementById('f-personal').checked = !!c.personalSeller;
   document.getElementById('f-free-shipping').checked = !!c.requireFreeShipping;
   document.getElementById('f-want-max').value = c.wantMax ?? '';
-  document.getElementById('f-title-include').value = c.titleInclude || '';
   document.getElementById('f-title-exclude').value = c.titleExclude || '';
   document.getElementById('f-coarse-semantic').checked = !!c.enableCoarseSemantic;
   document.getElementById('f-requirements').value = c.customRequirements || '';
@@ -807,6 +812,7 @@ function renderProducts() {
       wantCount: null,
       viewCount: null,
       updatedAt: '',
+      sellerLastSeen: '',
     });
   }
 
@@ -844,7 +850,7 @@ function renderProducts() {
       <td>${renderShipping(p.shipping)}</td>
       <td class="metric-cell">${formatCount(p.wantCount, p.wantText)}</td>
       <td class="metric-cell">${formatCount(p.viewCount, p.viewText)}</td>
-      <td class="updated-cell">${escapeHtml(formatUpdatedAt(p.updatedAt))}</td>
+      <td class="updated-cell">${escapeHtml(formatSellerLastSeen(p.sellerLastSeen || p.updatedAt))}</td>
       <td>${escapeHtml(p.sellerName || '')}</td>
       <td>${escapeHtml(p.sellerLocation || '')}</td>
       <td>${chatIds.has(p.id)
@@ -917,7 +923,7 @@ function formatCount(value, fallback = '') {
   return escapeHtml(fallback || '-');
 }
 
-function formatUpdatedAt(value) {
+function formatSellerLastSeen(value) {
   return String(value || '').replace(/\s+/g, ' ').trim() || '-';
 }
 
@@ -969,18 +975,23 @@ function sortProducts(products, chatIds, fineIds, coarseIds) {
     const n = Number(value);
     return Number.isFinite(n) ? n : Number.POSITIVE_INFINITY;
   };
-  const updatedValue = (value) => {
+  const lastSeenValue = (value) => {
     const text = String(value || '').trim();
     if (!text) return Number.POSITIVE_INFINITY;
-    const parsed = Date.parse(text.replace(/年|月/g, '-').replace(/日/g, ''));
-    if (Number.isFinite(parsed)) return parsed;
-    if (text.includes('刚刚')) return Date.now();
+    if (/在线|刚刚/.test(text)) return 0;
     const minute = text.match(/(\d+)\s*分钟前/);
-    if (minute) return Date.now() - Number(minute[1]) * 60 * 1000;
+    if (minute) return Number(minute[1]) * 60 * 1000;
     const hour = text.match(/(\d+)\s*小时前/);
-    if (hour) return Date.now() - Number(hour[1]) * 60 * 60 * 1000;
-    if (text.includes('今天')) return Date.now();
-    if (text.includes('昨天')) return Date.now() - 24 * 60 * 60 * 1000;
+    if (hour) return Number(hour[1]) * 60 * 60 * 1000;
+    const day = text.match(/(\d+)\s*天前/);
+    if (day) return Number(day[1]) * 24 * 60 * 60 * 1000;
+    const week = text.match(/(\d+)\s*周前/);
+    if (week) return Number(week[1]) * 7 * 24 * 60 * 60 * 1000;
+    const month = text.match(/(\d+)\s*月前/);
+    if (month) return Number(month[1]) * 30 * 24 * 60 * 60 * 1000;
+    if (text.includes('今天')) return 0;
+    if (text.includes('昨天')) return 24 * 60 * 60 * 1000;
+    if (text.includes('前天')) return 2 * 24 * 60 * 60 * 1000;
     return Number.POSITIVE_INFINITY;
   };
   const stageRank = (p) => {
@@ -996,7 +1007,7 @@ function sortProducts(products, chatIds, fineIds, coarseIds) {
     }
     if (productSort.key === 'want') return numberValue(p.wantCount);
     if (productSort.key === 'view') return numberValue(p.viewCount);
-    if (productSort.key === 'updated') return updatedValue(p.updatedAt);
+    if (productSort.key === 'updated') return lastSeenValue(p.sellerLastSeen || p.updatedAt);
     if (productSort.key === 'seller') return String(p.sellerName || '');
     if (productSort.key === 'location') return String(p.sellerLocation || '');
     if (productSort.key === 'stage') return stageRank(p);
@@ -1020,7 +1031,7 @@ function renderSortHeaders() {
   ['price', 'want', 'view', 'updated', 'seller', 'location', 'stage'].forEach(key => {
     const el = document.getElementById(`sort-${key}`);
     if (!el) return;
-    const label = { price: '价格', want: '想要', view: '浏览', updated: '更新', seller: '卖家', location: '地区', stage: '阶段' }[key];
+    const label = { price: '价格', want: '想要', view: '浏览', updated: '来过', seller: '卖家', location: '地区', stage: '阶段' }[key];
     const arrow = productSort.key === key ? (productSort.dir === 'asc' ? ' ↑' : ' ↓') : ' ↕';
     el.textContent = label + arrow;
     el.title = '点击排序';
@@ -1166,7 +1177,7 @@ function hideCreateModal() {
 }
 
 function clearForm() {
-  ['f-name', 'f-queries', 'f-price-min', 'f-price-max', 'f-region', 'f-want-max', 'f-title-include', 'f-title-exclude', 'f-requirements', 'f-chat-strategy'].forEach(id => {
+  ['f-name', 'f-queries', 'f-price-min', 'f-price-max', 'f-region', 'f-want-max', 'f-title-exclude', 'f-requirements', 'f-chat-strategy'].forEach(id => {
     document.getElementById(id).value = '';
   });
   document.getElementById('f-pages').value = '3';
