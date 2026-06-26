@@ -3,15 +3,15 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>闲鱼智能助手</title>
-  <link rel="stylesheet" href="style.css?v=8">
+  <title>VLG</title>
+  <link rel="stylesheet" href="style.css?v=24">
 </head>
 <body>
   <div id="app">
     <!-- Header -->
     <header class="header">
       <div class="header-left">
-        <h1>🐟 闲鱼智能助手</h1>
+        <h1>VLG Card System</h1>
         <span class="status-dot" id="ws-status"></span>
       </div>
       <div class="header-right">
@@ -19,15 +19,21 @@
           <label class="model-label">🤖 模型</label>
           <select id="model-select" onchange="switchModel(this.value)"></select>
         </div>
-        <button class="btn" onclick="showSettingsModal()" id="settings-btn">⚙️ 设置</button>
-        <button class="btn btn-primary" onclick="showCreateModal()">+ 新建任务</button>
+        <div class="settings-menu">
+          <button class="btn" onclick="toggleSettingsMenu(event)" id="settings-btn">设置</button>
+          <div class="settings-dropdown" id="settings-dropdown">
+            <button onclick="openApiSettings()">API 设置</button>
+            <button onclick="openBlacklistSettings()">商家黑名单</button>
+          </div>
+        </div>
+        <button class="btn btn-primary" onclick="openNewTaskModal()">+ 新建任务</button>
       </div>
     </header>
 
     <!-- Config Warning Banner -->
     <div class="config-banner" id="config-banner" style="display:none">
       <span>⚠️ AI 尚未配置，请先点击「设置」配置 API 密钥和模型，否则无法使用</span>
-      <button class="btn btn-sm btn-primary" onclick="showSettingsModal()">去配置</button>
+      <button class="btn btn-sm btn-primary" onclick="openApiSettings()">去配置</button>
     </div>
 
     <div class="main-layout">
@@ -60,16 +66,28 @@
           <!-- Products Tab -->
           <div class="tab-content active" id="tab-products">
             <div class="product-stats" id="product-stats"></div>
+            <div class="review-actions" id="review-actions" style="display:none"></div>
             <div class="product-table-wrap">
               <table class="product-table" id="product-table">
                 <thead>
                   <tr>
-                    <th>图片</th><th>标题</th><th>价格</th><th>地区</th><th>阶段</th>
+                    <th class="select-col"><span id="select-header-actions"></span></th>
+                    <th>图片</th>
+                    <th class="title-col">标题</th>
+                    <th><button class="sort-header" onclick="setProductSort('price')" id="sort-price" title="点击排序">价格</button></th>
+                    <th>包邮</th>
+                    <th><button class="sort-header" onclick="setProductSort('want')" id="sort-want" title="点击排序">想要</button></th>
+                    <th><button class="sort-header" onclick="setProductSort('view')" id="sort-view" title="点击排序">浏览</button></th>
+                    <th><button class="sort-header" onclick="setProductSort('updated')" id="sort-updated" title="点击排序">更新</button></th>
+                    <th><button class="sort-header" onclick="setProductSort('seller')" id="sort-seller" title="点击排序">卖家</button></th>
+                    <th><button class="sort-header" onclick="setProductSort('location')" id="sort-location" title="点击排序">地区</button></th>
+                    <th><button class="sort-header" onclick="setProductSort('stage')" id="sort-stage" title="点击排序">阶段</button></th>
                   </tr>
                 </thead>
                 <tbody id="product-tbody"></tbody>
               </table>
             </div>
+            <div class="pagination" id="product-pagination"></div>
           </div>
 
           <!-- Chats Tab -->
@@ -145,87 +163,156 @@
     </div>
   </div>
 
-  <!-- Create Task Modal -->
-  <div class="modal-overlay" id="modal-overlay" onclick="hideCreateModal()">
-    <div class="modal" onclick="event.stopPropagation()">
+  <!-- Image Preview Modal -->
+  <div class="modal-overlay" id="image-preview-overlay" onclick="hideImagePreview()">
+    <div class="image-preview-modal" onclick="event.stopPropagation()">
+      <button class="modal-close image-preview-close" onclick="hideImagePreview()">&times;</button>
+      <img id="image-preview-img" alt="商品大图">
+    </div>
+  </div>
+
+  <!-- Product Chat Detail Modal -->
+  <div class="modal-overlay" id="product-chat-modal-overlay" onclick="hideProductChatModal()">
+    <div class="modal chat-detail-modal" onclick="event.stopPropagation()">
       <div class="modal-header">
-        <h2>新建采购任务</h2>
-        <button class="modal-close" onclick="hideCreateModal()">&times;</button>
+        <h2 id="product-chat-title">聊天详情</h2>
+        <button class="modal-close" onclick="hideProductChatModal()">&times;</button>
       </div>
       <div class="modal-body">
-        <div class="form-group">
-          <label>任务名称</label>
-          <input id="f-name" type="text" placeholder="例如：找一台M4 MacBook Air">
-        </div>
-        <div class="form-group">
-          <label>搜索关键词 <span class="hint">（多个用逗号分隔）</span></label>
-          <input id="f-queries" type="text" placeholder="例如：MacBook Air M4, macbook air m4 13寸">
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label>最低价</label>
-            <input id="f-price-min" type="number" placeholder="不限">
-          </div>
-          <div class="form-group">
-            <label>最高价</label>
-            <input id="f-price-max" type="number" placeholder="不限">
-          </div>
-          <div class="form-group">
-            <label>最大页数</label>
-            <input id="f-pages" type="number" value="3" min="1" max="20">
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label>地区 <span class="hint">（省份或城市名）</span></label>
-            <input id="f-region" type="text" placeholder="例如：四川、成都、广东 深圳">
-          </div>
-          <div class="form-group checkbox-group">
-            <label><input id="f-personal" type="checkbox"> 仅个人闲置</label>
-          </div>
-        </div>
-        <div class="form-group">
-          <label>需求描述 <span class="hint">（用于AI筛选商品，自然语言描述你想买什么样的）</span></label>
-          <textarea id="f-requirements" rows="3" placeholder="例如：只要成色9新以上的，电池健康90%以上，价格4500以内优先，最好有原装配件和发票。不要华强北翻新机。"></textarea>
-        </div>
-        <div class="form-group">
-          <label>谈价策略 <span class="hint">（用于AI和卖家沟通时的策略指导）</span></label>
-          <textarea id="f-chat-strategy" rows="3" placeholder="例如：心理价位4200-4500，先夸商品再试探能不能少，如果卖家坚持不降就问能不能包邮。不要表现得太急切。"></textarea>
-        </div>
+        <div id="product-chat-meta" class="chat-detail-meta"></div>
+        <div id="product-chat-messages" class="chat-messages chat-detail-messages"></div>
+      </div>
+    </div>
+  </div>
 
-        <!-- 高级设置折叠区 -->
+  <!-- Seller Blacklist Modal -->
+  <div class="modal-overlay" id="blacklist-modal-overlay" onclick="hideBlacklistModal()">
+    <div class="modal settings-modal" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h2>商家黑名单</h2>
+        <button class="modal-close" onclick="hideBlacklistModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="settings-desc">每行一个商家名。细筛时如果卖家名命中名单，会直接跳过该商品。</p>
+        <div class="form-group">
+          <label>黑名单商家</label>
+          <textarea id="seller-blacklist" rows="12" placeholder="例如：&#10;某某卡牌店&#10;不想联系的卖家"></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="hideBlacklistModal()">取消</button>
+        <button class="btn btn-primary" onclick="saveBlacklist()">保存黑名单</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Create Task Modal -->
+  <div class="modal-overlay" id="modal-overlay" onclick="hideCreateModal()">
+    <div class="modal task-modal" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h2 id="task-modal-title">新建采购任务</h2>
+        <button class="modal-close" onclick="hideCreateModal()">&times;</button>
+      </div>
+      <div class="modal-body task-form">
+        <section class="form-section">
+          <div class="section-title">采集</div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>任务名</label>
+              <input id="f-name" type="text" placeholder="M4 MacBook Air">
+            </div>
+            <div class="form-group">
+              <label>最大页数</label>
+              <input id="f-pages" type="number" value="3" min="1" max="20">
+            </div>
+          </div>
+          <div class="form-group">
+            <label>关键词</label>
+            <input id="f-queries" type="text" placeholder="MacBook Air M4, macbook air 13">
+          </div>
+        </section>
+
+        <section class="form-section">
+          <div class="section-title">粗筛</div>
+          <div class="form-row compact-row">
+            <div class="form-group">
+              <label>最低价</label>
+              <input id="f-price-min" type="number" placeholder="不限">
+            </div>
+            <div class="form-group">
+              <label>最高价</label>
+              <input id="f-price-max" type="number" placeholder="不限">
+            </div>
+            <div class="form-group">
+              <label>想要≤</label>
+              <input id="f-want-max" type="number" min="0" placeholder="不限">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>地区</label>
+              <input id="f-region" type="text" placeholder="四川、成都">
+            </div>
+            <div class="form-group">
+              <label>标题包含</label>
+              <input id="f-title-include" type="text" placeholder="国行、原装">
+            </div>
+            <div class="form-group">
+              <label>标题排除</label>
+              <input id="f-title-exclude" type="text" placeholder="求购、维修、配件">
+            </div>
+          </div>
+          <div class="inline-checks">
+            <label><input id="f-personal" type="checkbox"> 个人闲置</label>
+            <label><input id="f-free-shipping" type="checkbox"> 包邮</label>
+            <label><input id="f-coarse-semantic" type="checkbox"> 标题语义筛</label>
+          </div>
+        </section>
+
+        <section class="form-section">
+          <div class="section-title">细筛</div>
+          <div class="form-group">
+            <label>需求描述</label>
+            <textarea id="f-requirements" rows="3" placeholder="成色、电池、配件、避雷点等"></textarea>
+          </div>
+        </section>
+
+        <section class="form-section">
+          <div class="section-title">聊天</div>
+          <div class="form-group">
+            <label>谈价策略</label>
+            <textarea id="f-chat-strategy" rows="3" placeholder="心理价位、让步空间、是否争取包邮"></textarea>
+          </div>
+        </section>
+
         <details class="advanced-section">
-          <summary class="advanced-toggle">高级设置 — Prompt 配置</summary>
-
+          <summary class="advanced-toggle">高级</summary>
           <div class="form-group" style="margin-top:12px">
-            <label>粗筛 Prompt <span class="hint">（AI根据标题初筛商品时的指令）</span></label>
+            <label>标题语义筛 Prompt</label>
             <textarea id="f-coarse-prompt" rows="4" class="persona-editor"></textarea>
             <div class="persona-actions">
               <button type="button" class="btn btn-sm" onclick="resetCoarsePrompt()">恢复默认</button>
             </div>
           </div>
-
           <div class="form-group">
-            <label>细筛 Prompt <span class="hint">（AI根据详情页深度筛选时的指令）</span></label>
+            <label>细筛 Prompt</label>
             <textarea id="f-fine-prompt" rows="4" class="persona-editor"></textarea>
             <div class="persona-actions">
               <button type="button" class="btn btn-sm" onclick="resetFinePrompt()">恢复默认</button>
             </div>
           </div>
-
           <div class="form-group">
-            <label>聊天人设 <span class="hint">（AI与卖家沟通时扮演的角色、语气、规则）</span></label>
-            <textarea id="f-persona" rows="10" class="persona-editor"></textarea>
+            <label>聊天人设</label>
+            <textarea id="f-persona" rows="8" class="persona-editor"></textarea>
             <div class="persona-actions">
-              <button type="button" class="btn btn-sm" onclick="resetPersona()">恢复默认人设</button>
-              <span class="hint" id="persona-hint">留空则使用默认人设</span>
+              <button type="button" class="btn btn-sm" onclick="resetPersona()">恢复默认</button>
             </div>
           </div>
         </details>
       </div>
       <div class="modal-footer">
         <button class="btn" onclick="hideCreateModal()">取消</button>
-        <button class="btn btn-primary" onclick="createTask()">创建并启动</button>
+        <button class="btn btn-primary" id="task-modal-submit" onclick="createTask()">创建并启动</button>
       </div>
     </div>
   </div>
@@ -255,6 +342,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=8"></script>
+  <script src="app.js?v=24"></script>
 </body>
 </html>

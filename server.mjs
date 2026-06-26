@@ -3,6 +3,7 @@ import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { spawn } from 'child_process';
 import { TaskManager } from './lib/task.mjs';
 import {
   DEFAULT_PERSONA, DEFAULT_COARSE_PROMPT, DEFAULT_FINE_PROMPT,
@@ -46,6 +47,30 @@ function broadcast(msg) {
   }
 }
 
+function openInDefaultBrowser(url) {
+  const platform = process.platform;
+  let command;
+  let args;
+
+  if (platform === 'win32') {
+    command = 'cmd';
+    args = ['/c', 'start', '', url];
+  } else if (platform === 'darwin') {
+    command = 'open';
+    args = [url];
+  } else {
+    command = 'xdg-open';
+    args = [url];
+  }
+
+  const child = spawn(command, args, {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  child.unref();
+}
+
 const taskManager = new TaskManager(broadcast);
 
 // ========== Config API ==========
@@ -58,13 +83,14 @@ app.get('/api/config', (req, res) => {
 });
 
 app.post('/api/config', (req, res) => {
-  const { provider, apiKey, baseUrl, model, customModels } = req.body;
+  const { provider, apiKey, baseUrl, model, customModels, sellerBlacklist } = req.body;
   const update = {};
   if (provider !== undefined) update.provider = provider;
   if (apiKey !== undefined) update.apiKey = apiKey;
   if (baseUrl !== undefined) update.baseUrl = baseUrl;
   if (model !== undefined) update.model = model;
   if (customModels !== undefined) update.customModels = customModels;
+  if (sellerBlacklist !== undefined) update.sellerBlacklist = sellerBlacklist;
 
   saveConfig(update);
   broadcast({
@@ -141,8 +167,36 @@ app.post('/api/tasks/:id/start', (req, res) => {
   res.json({ ok: true });
 });
 
+app.put('/api/tasks/:id', (req, res) => {
+  const result = taskManager.updateTask(req.params.id, req.body);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  res.json(result);
+});
+
+app.post('/api/tasks/:id/chat', async (req, res) => {
+  if (!isConfigured()) {
+    return res.status(400).json({ error: '请先在设置中配置 AI API' });
+  }
+  const task = taskManager.getTask(req.params.id);
+  if (!task) return res.status(404).json({ error: 'Task not found' });
+
+  const updates = {};
+  if (req.body.chatStrategy !== undefined) updates.chatStrategy = req.body.chatStrategy;
+  if (req.body.persona !== undefined) updates.persona = req.body.persona;
+
+  const result = await taskManager.startChat(req.params.id, req.body.productIds || [], updates);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  res.json({ ok: true });
+});
+
 app.post('/api/tasks/:id/stop', (req, res) => {
   taskManager.stopTask(req.params.id);
+  res.json({ ok: true });
+});
+
+app.post('/api/tasks/:id/rerun', (req, res) => {
+  const result = taskManager.rerunStage(req.params.id, req.body.stage);
+  if (!result.ok) return res.status(400).json({ error: result.error });
   res.json({ ok: true });
 });
 
@@ -179,6 +233,24 @@ app.post('/api/model', (req, res) => {
   if (!ok) return res.status(400).json({ error: '不支持的模型' });
   broadcast({ event: 'model:changed', data: { current: getCurrentModel(), models: getAvailableModels() } });
   res.json({ ok: true, current: getCurrentModel() });
+});
+
+app.post('/api/open-product', async (req, res) => {
+  try {
+    const rawUrl = String(req.body?.url || '').trim();
+    if (!rawUrl) return res.status(400).json({ error: '缺少商品链接' });
+
+    const url = new URL(rawUrl);
+    const allowedHosts = ['www.goofish.com', 'goofish.com', '2.taobao.com', 'item.taobao.com'];
+    if (!['http:', 'https:'].includes(url.protocol) || !allowedHosts.includes(url.hostname)) {
+      return res.status(400).json({ error: '只支持打开闲鱼/淘宝商品链接' });
+    }
+
+    openInDefaultBrowser(url.toString());
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: `打开商品页失败: ${err.message}` });
+  }
 });
 
 server.listen(PORT, () => {
