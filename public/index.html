@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>VLG</title>
-  <link rel="stylesheet" href="style.css?v=24">
+  <link rel="stylesheet" href="style.css?v=40">
 </head>
 <body>
   <div id="app">
@@ -59,6 +59,7 @@
           <!-- Tab Bar -->
           <div class="tab-bar">
             <button class="tab active" data-tab="products" onclick="switchTab('products')">商品列表</button>
+            <button class="tab" data-tab="tracking" onclick="switchTab('tracking')">价格跟踪</button>
             <button class="tab" data-tab="chats" onclick="switchTab('chats')">聊天会话</button>
             <button class="tab" data-tab="logs" onclick="switchTab('logs')">运行日志</button>
           </div>
@@ -75,13 +76,11 @@
                     <th>图片</th>
                     <th class="title-col">标题</th>
                     <th><button class="sort-header" onclick="setProductSort('price')" id="sort-price" title="点击排序">价格</button></th>
-                    <th>包邮</th>
-                    <th><button class="sort-header" onclick="setProductSort('want')" id="sort-want" title="点击排序">想要</button></th>
-                    <th><button class="sort-header" onclick="setProductSort('view')" id="sort-view" title="点击排序">浏览</button></th>
-                    <th><button class="sort-header" onclick="setProductSort('updated')" id="sort-updated" title="点击排序">来过</button></th>
-                    <th><button class="sort-header" onclick="setProductSort('seller')" id="sort-seller" title="点击排序">卖家</button></th>
-                    <th><button class="sort-header" onclick="setProductSort('location')" id="sort-location" title="点击排序">地区</button></th>
-                    <th><button class="sort-header" onclick="setProductSort('stage')" id="sort-stage" title="点击排序">阶段</button></th>
+                    <th><button class="sort-header" onclick="setProductSort('priceChange')" id="sort-priceChange" title="点击排序">变化</button></th>
+                    <th><button class="sort-header" onclick="setProductSort('want')" id="sort-want" title="点击排序">热度</button></th>
+                    <th><button class="sort-header" onclick="setProductSort('updated')" id="sort-updated" title="点击排序">时效</button></th>
+                    <th><button class="sort-header" onclick="setProductSort('sellerScore')" id="sort-sellerScore" title="点击排序">卖家</button></th>
+                    <th>操作</th>
                   </tr>
                 </thead>
                 <tbody id="product-tbody"></tbody>
@@ -93,6 +92,52 @@
           <!-- Chats Tab -->
           <div class="tab-content" id="tab-chats">
             <div id="chat-sessions"></div>
+          </div>
+
+          <!-- Price Tracking Tab -->
+          <div class="tab-content" id="tab-tracking">
+            <div class="tracker-toolbar">
+              <input id="tracker-url" type="text" placeholder="粘贴闲鱼商品链接">
+              <input id="tracker-search" type="text" placeholder="搜索商品标题或商家姓名" oninput="setTrackerSearch(this.value)">
+              <button class="btn btn-primary" onclick="addTrackedProductFromInput()">添加跟踪</button>
+              <button class="btn" onclick="checkSelectedTrackedProducts()">检查已选</button>
+              <button class="btn tracker-filter-btn" id="tracker-filter-starred" onclick="toggleTrackerStarredFilter()">★ 星标</button>
+              <button class="btn tracker-filter-btn" id="tracker-filter-drops" onclick="toggleTrackerDropFilter()">只看降价</button>
+            </div>
+            <div class="tracker-table-wrap">
+              <table class="tracker-table">
+                <colgroup>
+                  <col class="tracker-col-check">
+                  <col class="tracker-col-star">
+                  <col class="tracker-col-product">
+                  <col class="tracker-col-price">
+                  <col class="tracker-col-first">
+                  <col class="tracker-col-lowest">
+                  <col class="tracker-col-change">
+                  <col class="tracker-col-checked">
+                  <col class="tracker-col-status">
+                  <col class="tracker-col-note">
+                  <col class="tracker-col-actions">
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th class="tracker-check-col"><input id="tracker-select-all" class="review-checkbox" type="checkbox" onchange="toggleAllTrackedProducts(this.checked)" title="全选当前列表"></th>
+                    <th class="tracker-star-col">★</th>
+                    <th>商品</th>
+                    <th><button class="sort-header" onclick="setTrackerSort('currentPrice')" id="tracker-sort-currentPrice" title="点击排序">当前价</button></th>
+                    <th><button class="sort-header" onclick="setTrackerSort('firstPrice')" id="tracker-sort-firstPrice" title="点击排序">首次</button></th>
+                    <th><button class="sort-header" onclick="setTrackerSort('lowestPrice')" id="tracker-sort-lowestPrice" title="点击排序">最低</button></th>
+                    <th><button class="sort-header" onclick="setTrackerSort('priceDelta')" id="tracker-sort-priceDelta" title="点击排序">变化</button></th>
+                    <th><button class="sort-header" onclick="setTrackerSort('lastCheckedAt')" id="tracker-sort-lastCheckedAt" title="点击排序">最近检查</button></th>
+                    <th><button class="sort-header" onclick="setTrackerSort('status')" id="tracker-sort-status" title="点击排序">状态</button></th>
+                    <th>备注</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="tracker-tbody"></tbody>
+              </table>
+            </div>
+            <div class="pagination" id="tracker-pagination"></div>
           </div>
 
           <!-- Logs Tab -->
@@ -185,6 +230,30 @@
     </div>
   </div>
 
+  <!-- Price History Modal -->
+  <div class="modal-overlay" id="tracker-history-modal-overlay" onclick="hideTrackerHistoryModal()">
+    <div class="modal tracker-history-modal" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h2 id="tracker-history-title">价格历史</h2>
+        <button class="modal-close" onclick="hideTrackerHistoryModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="tracker-history-summary" class="tracker-history-summary"></div>
+        <table class="tracker-history-table">
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>价格</th>
+              <th>变化</th>
+              <th>备注</th>
+            </tr>
+          </thead>
+          <tbody id="tracker-history-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
   <!-- Seller Blacklist Modal -->
   <div class="modal-overlay" id="blacklist-modal-overlay" onclick="hideBlacklistModal()">
     <div class="modal settings-modal" onclick="event.stopPropagation()">
@@ -206,6 +275,24 @@
     </div>
   </div>
 
+  <!-- Seller Manual Label Modal -->
+  <div class="modal-overlay" id="seller-label-modal-overlay" onclick="hideSellerLabelModal()">
+    <div class="modal seller-label-modal" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h2>卖家标注</h2>
+        <button class="modal-close" onclick="hideSellerLabelModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="settings-desc" id="seller-label-desc"></p>
+        <div class="seller-label-actions">
+          <button class="btn" onclick="saveSellerManualLabel('小B')">标为小B</button>
+          <button class="btn" onclick="saveSellerManualLabel('大卖')">标为大卖</button>
+          <button class="btn" onclick="saveSellerManualLabel('')">清除标注</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Create Task Modal -->
   <div class="modal-overlay" id="modal-overlay" onclick="hideCreateModal()">
     <div class="modal task-modal" onclick="event.stopPropagation()">
@@ -220,6 +307,10 @@
             <div class="form-group">
               <label>任务名</label>
               <input id="f-name" type="text" placeholder="M4 MacBook Air">
+            </div>
+            <div class="form-group">
+              <label>分组</label>
+              <input id="f-group" type="text" placeholder="宝可梦">
             </div>
             <div class="form-group">
               <label>最大页数</label>
@@ -338,6 +429,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=27"></script>
+  <script src="app.js?v=51"></script>
 </body>
 </html>

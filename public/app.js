@@ -12,7 +12,19 @@ let productFilter = 'fine';
 let editingTaskId = null;
 let productPage = 1;
 let productSort = { key: '', dir: 'asc' };
+let labelingSellerName = '';
+let activeTaskGroup = '全部';
+let trackedProducts = [];
+let trackerBusy = false;
+let trackerSearch = '';
+let trackerSort = { key: '', dir: 'asc' };
+let trackerOnlyStarred = false;
+let trackerOnlyDrops = false;
+let trackerPage = 1;
+let selectedTrackedProductIds = new Set();
 const PRODUCT_PAGE_SIZE = 50;
+const TRACKER_PAGE_SIZE = 50;
+const SELLER_LABELS_STORAGE_KEY = 'bricksSellerManualLabels';
 
 const STAGE_LABELS = {
   pending: '等待中',
@@ -125,7 +137,7 @@ function handleWSMessage(msg) {
         showConfigBanner();
       }
       if (data?.config) {
-        currentConfig = data.config;
+        currentConfig = mergeSellerManualLabels(data.config);
       }
       loadModel();
       break;
@@ -214,6 +226,82 @@ function hideBlacklistModal() {
   document.getElementById('blacklist-modal-overlay').classList.remove('show');
 }
 
+function normalizeSellerKey(name) {
+  return String(name || '').trim().toLowerCase();
+}
+
+function loadLocalSellerManualLabels() {
+  try {
+    return JSON.parse(localStorage.getItem(SELLER_LABELS_STORAGE_KEY) || '{}') || {};
+  } catch {
+    return {};
+  }
+}
+
+function saveLocalSellerManualLabels(labels) {
+  try {
+    localStorage.setItem(SELLER_LABELS_STORAGE_KEY, JSON.stringify(labels || {}));
+  } catch { /* ignore */ }
+}
+
+function mergeSellerManualLabels(config = {}) {
+  const localLabels = loadLocalSellerManualLabels();
+  return {
+    ...config,
+    sellerManualLabels: {
+      ...(config.sellerManualLabels || {}),
+      ...localLabels,
+    },
+  };
+}
+
+function getSellerManualLabel(name) {
+  const labels = currentConfig.sellerManualLabels || {};
+  const rawName = String(name || '').trim();
+  return labels[normalizeSellerKey(rawName)] || labels[rawName] || '';
+}
+
+function showSellerLabelModal(sellerName) {
+  labelingSellerName = String(sellerName || '').trim();
+  if (!labelingSellerName) return;
+  const current = getSellerManualLabel(labelingSellerName);
+  document.getElementById('seller-label-desc').textContent = current
+    ? `${labelingSellerName} 当前人工标注：${current}`
+    : `${labelingSellerName} 尚未人工标注`;
+  document.getElementById('seller-label-modal-overlay').classList.add('show');
+}
+
+function hideSellerLabelModal() {
+  document.getElementById('seller-label-modal-overlay').classList.remove('show');
+  labelingSellerName = '';
+}
+
+async function saveSellerManualLabel(label) {
+  if (!labelingSellerName) return;
+  const labels = { ...(currentConfig.sellerManualLabels || {}) };
+  const key = normalizeSellerKey(labelingSellerName);
+  if (label) labels[key] = label;
+  else delete labels[key];
+  currentConfig = { ...currentConfig, sellerManualLabels: labels };
+  saveLocalSellerManualLabels(labels);
+
+  try {
+    const res = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sellerManualLabels: labels }),
+    });
+    const data = await res.json();
+    if (data.config) currentConfig = mergeSellerManualLabels(data.config);
+    hideSellerLabelModal();
+    renderProducts();
+  } catch (err) {
+    hideSellerLabelModal();
+    renderProducts();
+    alert('卖家标注已在当前浏览器保存；后端保存失败，重启服务后会恢复完整保存: ' + err.message);
+  }
+}
+
 function populateBlacklistForm() {
   const input = document.getElementById('seller-blacklist');
   if (input) input.value = (currentConfig.sellerBlacklist || []).join('\n');
@@ -232,7 +320,7 @@ async function saveBlacklist() {
       body: JSON.stringify({ sellerBlacklist }),
     });
     const data = await res.json();
-    if (data.config) currentConfig = data.config;
+    if (data.config) currentConfig = mergeSellerManualLabels(data.config);
     hideBlacklistModal();
   } catch (err) {
     alert('保存黑名单失败: ' + err.message);
@@ -252,7 +340,7 @@ async function loadProviders() {
 async function loadCurrentConfig() {
   try {
     const res = await fetch('/api/config');
-    currentConfig = await res.json();
+    currentConfig = mergeSellerManualLabels(await res.json());
   } catch { /* ignore */ }
 }
 
@@ -387,7 +475,7 @@ async function saveSettingsQuiet() {
     body: JSON.stringify(body),
   });
   const data = await res.json();
-  if (data.config) currentConfig = data.config;
+  if (data.config) currentConfig = mergeSellerManualLabels(data.config);
   return data;
 }
 
@@ -465,6 +553,7 @@ async function createTask() {
 
 function readTaskForm() {
   const name = document.getElementById('f-name').value.trim();
+  const group = document.getElementById('f-group').value.trim();
   const queriesRaw = document.getElementById('f-queries').value.trim();
   const priceMin = document.getElementById('f-price-min').value;
   const priceMax = document.getElementById('f-price-max').value;
@@ -480,6 +569,7 @@ function readTaskForm() {
 
   return {
     name: name || queries[0],
+    group: group || (activeTaskGroup !== '全部' ? activeTaskGroup : '未分组'),
     queries,
     priceMin: priceMin ? Number(priceMin) : null,
     priceMax: priceMax ? Number(priceMax) : null,
@@ -572,6 +662,7 @@ function editTask(id) {
 function fillTaskForm(task, nameOverride) {
   const c = task.config;
   document.getElementById('f-name').value = nameOverride ?? (task.name || '');
+  document.getElementById('f-group').value = getTaskGroup(task) || (activeTaskGroup !== '全部' ? activeTaskGroup : '未分组');
   document.getElementById('f-queries').value = (c.queries || []).join(', ');
   document.getElementById('f-price-min').value = c.priceMin ?? '';
   document.getElementById('f-price-max').value = c.priceMax ?? '';
@@ -611,17 +702,53 @@ async function refreshTask(id) {
 // ========== Render: Task List ==========
 function renderTaskList() {
   const container = document.getElementById('task-list');
-  container.innerHTML = tasks.map(t => `
+  const groupCounts = new Map();
+  tasks.forEach(t => {
+    const group = getTaskGroup(t);
+    groupCounts.set(group, (groupCounts.get(group) || 0) + 1);
+  });
+  const groups = ['全部', ...[...groupCounts.keys()].sort((a, b) => a.localeCompare(b, 'zh-CN'))];
+  if (activeTaskGroup !== '全部' && !groupCounts.has(activeTaskGroup)) activeTaskGroup = '全部';
+
+  const visibleTasks = activeTaskGroup === '全部'
+    ? tasks
+    : tasks.filter(t => getTaskGroup(t) === activeTaskGroup);
+
+  container.innerHTML = `
+    <div class="task-group-filter">
+      <label>分组</label>
+      <select onchange="setTaskGroup(this.value)">
+        ${groups.map(group => `
+          <option value="${escapeHtml(group)}" ${group === activeTaskGroup ? 'selected' : ''}>
+            ${escapeHtml(group)} (${group === '全部' ? tasks.length : groupCounts.get(group)})
+          </option>
+        `).join('')}
+      </select>
+    </div>
+    <div class="task-list-items">
+      ${visibleTasks.map(t => `
     <div class="task-card ${t.id === activeTaskId ? 'active' : ''}" onclick="selectTask('${t.id}')">
-      <div class="task-card-name">${escapeHtml(t.name)}</div>
+      <div class="task-card-name" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</div>
       <div class="task-card-meta">
         <span class="stage-badge stage-${t.stage}">${STAGE_LABELS[t.stage] || t.stage}</span>
-        <span style="font-size:11px;color:var(--text2)">
-          ${t.products ? `${t.products.rawCount || 0}件` : ''}
-        </span>
+        <span class="task-count">${t.products ? `${t.products.rawCount || 0}件` : ''}</span>
       </div>
     </div>
-  `).join('');
+      `).join('') || '<div class="task-empty">这个分组暂无任务</div>'}
+    </div>
+  `;
+}
+
+function setTaskGroup(group) {
+  activeTaskGroup = group || '全部';
+  const visible = activeTaskGroup === '全部'
+    ? tasks
+    : tasks.filter(t => getTaskGroup(t) === activeTaskGroup);
+  if (activeTaskId && !visible.some(t => t.id === activeTaskId)) {
+    activeTaskId = visible[0]?.id || null;
+    renderTaskDetail();
+  }
+  renderTaskList();
 }
 
 function selectTask(id) {
@@ -629,6 +756,9 @@ function selectTask(id) {
   productFilter = 'fine';
   productPage = 1;
   productSort = { key: '', dir: 'asc' };
+  if (document.querySelector('.tab.active')?.dataset.tab === 'tracking') {
+    switchTab('products');
+  }
   renderTaskList();
   refreshTask(id).then(() => renderTaskDetail());
 }
@@ -813,6 +943,11 @@ function renderProducts() {
       viewCount: null,
       updatedAt: '',
       sellerLastSeen: '',
+      sellerType: '',
+      sellerPersonalScore: null,
+      firstSeenAt: null,
+      priceChange: '',
+      priceDelta: 0,
     });
   }
 
@@ -837,6 +972,7 @@ function renderProducts() {
 
     const selectable = task.stage === 'review' && fineIds.has(p.id);
     const checked = (task.selectedProductIds || []).includes(p.id) ? 'checked' : '';
+    const tracked = isProductTracked(p);
 
     return `<tr>
       <td class="select-col">
@@ -847,15 +983,17 @@ function renderProducts() {
       <td>${p.image ? `<img class="product-img" src="${escapeHtml(p.image)}" loading="lazy" onclick="showImagePreview('${escapeHtml(p.image)}')">` : '-'}</td>
       <td class="product-title" title="${escapeHtml(p.title)}">${renderProductTitle(p)}</td>
       <td class="product-price">${escapeHtml(p.price || '')}</td>
-      <td>${renderShipping(p.shipping)}</td>
-      <td class="metric-cell">${formatCount(p.wantCount, p.wantText)}</td>
-      <td class="metric-cell">${formatCount(p.viewCount, p.viewText)}</td>
-      <td class="updated-cell">${escapeHtml(formatSellerLastSeen(p.sellerLastSeen || p.updatedAt))}</td>
-      <td>${escapeHtml(p.sellerName || '')}</td>
-      <td>${escapeHtml(p.sellerLocation || '')}</td>
-      <td>${chatIds.has(p.id)
-        ? `<button class="badge badge-button ${badgeCls}" onclick="showProductChatModal('${escapeHtml(p.id)}')">${badge}</button>`
-        : `<span class="badge ${badgeCls}">${badge}</span>`}
+      <td>${renderPriceChange(p)}</td>
+      <td>${renderProductHeat(p)}</td>
+      <td>${renderProductFreshness(p)}</td>
+      <td>${renderSellerCell(p)}</td>
+      <td>
+        <div class="product-actions">
+          ${chatIds.has(p.id)
+            ? `<button class="badge badge-button ${badgeCls}" onclick="showProductChatModal('${escapeHtml(p.id)}')">${badge}</button>`
+            : `<span class="badge ${badgeCls}">${badge}</span>`}
+          <button class="track-btn ${tracked ? 'tracked' : ''}" data-url="${escapeHtml(p.href || '')}" data-title="${escapeHtml(p.title || '')}" onclick="addProductToTrackerFromList(this.dataset.url, this.dataset.title)" ${p.href && !tracked ? '' : 'disabled'}>${tracked ? '已跟踪' : '跟踪'}</button>
+        </div>
       </td>
     </tr>`;
   }).join('');
@@ -863,29 +1001,43 @@ function renderProducts() {
   renderProductPagination(all.length, totalPages, pageStart, pageItems.length);
 }
 
+function getProductTrackId(productOrUrl) {
+  const raw = typeof productOrUrl === 'string' ? productOrUrl : (productOrUrl?.href || productOrUrl?.url || '');
+  try {
+    const url = new URL(raw, window.location.href);
+    return url.searchParams.get('id') || url.pathname.match(/(\d{8,})/)?.[1] || '';
+  } catch {
+    return typeof productOrUrl === 'string' ? '' : (productOrUrl?.id || '');
+  }
+}
+
+function isProductTracked(product) {
+  const trackId = getProductTrackId(product);
+  if (!trackId) return false;
+  return trackedProducts.some(item => item.id === trackId);
+}
+
 function renderProductTitle(product) {
   const title = escapeHtml(product.title || '');
   if (!product.href) return title;
-  return `<button class="title-link" data-href="${escapeHtml(product.href)}" onclick="openProductPage(this.dataset.href)" title="用本机默认浏览器打开商品页">${title}</button>`;
+  return `<button class="title-link" data-href="${escapeHtml(product.href)}" onclick="openProductPage(this.dataset.href)" title="在当前浏览器新标签页打开商品页">${title}</button>`;
 }
 
-async function openProductPage(url) {
+function openProductPage(url) {
   if (!url) {
     alert('这个商品没有可打开的链接');
     return;
   }
   try {
-    const res = await fetch('/api/open-product', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.ok) {
-      alert(data.error || '打开失败，请重启服务后再试');
+    const parsed = new URL(url, window.location.href);
+    const allowedHosts = ['www.goofish.com', 'goofish.com', '2.taobao.com', 'item.taobao.com'];
+    if (!['http:', 'https:'].includes(parsed.protocol) || !allowedHosts.includes(parsed.hostname)) {
+      alert('只支持打开闲鱼/淘宝商品链接');
+      return;
     }
+    window.open(parsed.toString(), '_blank', 'noopener,noreferrer');
   } catch (err) {
-    alert(`打开失败，请确认服务已重启: ${err.message}`);
+    alert(`打开失败: ${err.message}`);
   }
 }
 
@@ -913,6 +1065,57 @@ function renderShipping(value) {
   return `<span class="shipping-tag ${cls}">${escapeHtml(text)}</span>`;
 }
 
+function renderPriceChange(product) {
+  const change = product.priceChange || (product.firstSeenAt ? '未变' : '');
+  const delta = Number(product.priceDelta || 0);
+  if (!change) return '<span class="price-change muted">-</span>';
+  if (change === '新发现') return '<span class="price-change price-new">新</span>';
+  if (change === '降价') return `<span class="price-change price-down">降 ${escapeHtml(Math.abs(delta).toFixed(0))}</span>`;
+  if (change === '涨价') return `<span class="price-change price-up">涨 ${escapeHtml(Math.abs(delta).toFixed(0))}</span>`;
+  return '<span class="price-change muted">未变</span>';
+}
+
+function renderSellerProfile(product) {
+  const manualLabel = getSellerManualLabel(product.sellerName) || product.sellerManualLabel || '';
+  const type = manualLabel || product.sellerType || '待判断';
+  const score = manualLabel ? null : (Number.isFinite(Number(product.sellerPersonalScore)) ? Number(product.sellerPersonalScore) : null);
+  const reason = manualLabel ? `人工标注：${manualLabel}` : (product.sellerProfileReason || '细筛后生成');
+  const cls = type === '个人倾向'
+    ? 'seller-personal'
+    : (type === '大卖' ? 'seller-business-strong' : (type === '小B' || type === '明显小B' ? 'seller-business-strong' : (type === '疑似小B' ? 'seller-business' : 'seller-unknown')));
+  const label = score == null ? type : `${type} ${score}`;
+  const sellerName = product.sellerName || '';
+  return `<button class="seller-profile seller-profile-button ${cls}" data-seller="${escapeHtml(sellerName)}" title="${escapeHtml(reason)}" onclick="showSellerLabelModal(this.dataset.seller)">${escapeHtml(label)}</button>`;
+}
+
+function renderProductHeat(product) {
+  return `
+    <div class="compact-stack">
+      <div>${renderShipping(product.shipping)}</div>
+      <div class="compact-meta">想 ${formatCount(product.wantCount, product.wantText)} / 浏览 ${formatCount(product.viewCount, product.viewText)}</div>
+    </div>
+  `;
+}
+
+function renderProductFreshness(product) {
+  return `
+    <div class="compact-stack">
+      <div>${escapeHtml(formatSellerLastSeen(product.sellerLastSeen || product.updatedAt))}</div>
+      <div class="compact-meta">发现 ${escapeHtml(formatTimeAgo(product.firstSeenAt))}</div>
+    </div>
+  `;
+}
+
+function renderSellerCell(product) {
+  return `
+    <div class="seller-cell">
+      <div>${renderSellerProfile(product)}</div>
+      <div class="seller-line" title="${escapeHtml(product.sellerName || '')}">${escapeHtml(product.sellerName || '-')}</div>
+      <div class="compact-meta">${escapeHtml(product.sellerLocation || '')}</div>
+    </div>
+  `;
+}
+
 function formatCount(value, fallback = '') {
   if (value === 0) return '0';
   if (value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))) {
@@ -925,6 +1128,17 @@ function formatCount(value, fallback = '') {
 
 function formatSellerLastSeen(value) {
   return String(value || '').replace(/\s+/g, ' ').trim() || '-';
+}
+
+function formatTimeAgo(value) {
+  const time = Number(value);
+  if (!Number.isFinite(time) || time <= 0) return '-';
+  const diff = Date.now() - time;
+  if (diff < 60 * 1000) return '刚刚';
+  if (diff < 60 * 60 * 1000) return `${Math.floor(diff / 60000)}分钟前`;
+  if (diff < 24 * 60 * 60 * 1000) return `${Math.floor(diff / 3600000)}小时前`;
+  if (diff < 7 * 24 * 60 * 60 * 1000) return `${Math.floor(diff / 86400000)}天前`;
+  return new Date(time).toLocaleDateString('zh-CN');
 }
 
 function renderProductPagination(total, totalPages, pageStart, pageCount) {
@@ -1008,6 +1222,19 @@ function sortProducts(products, chatIds, fineIds, coarseIds) {
     if (productSort.key === 'want') return numberValue(p.wantCount);
     if (productSort.key === 'view') return numberValue(p.viewCount);
     if (productSort.key === 'updated') return lastSeenValue(p.sellerLastSeen || p.updatedAt);
+    if (productSort.key === 'sellerScore') {
+      const manual = getSellerManualLabel(p.sellerName) || p.sellerManualLabel || '';
+      if (manual === '大卖') return 100;
+      if (manual === '小B') return 75;
+      return Number.isFinite(Number(p.sellerPersonalScore)) ? -Number(p.sellerPersonalScore) : Number.POSITIVE_INFINITY;
+    }
+    if (productSort.key === 'firstSeen') return Number.isFinite(Number(p.firstSeenAt)) ? -Number(p.firstSeenAt) : Number.POSITIVE_INFINITY;
+    if (productSort.key === 'priceChange') {
+      if (p.priceChange === '降价') return -1000000000 + Number(p.priceDelta || 0);
+      if (p.priceChange === '新发现') return -500000000;
+      if (p.priceChange === '涨价') return 500000000 + Number(p.priceDelta || 0);
+      return 0;
+    }
     if (productSort.key === 'seller') return String(p.sellerName || '');
     if (productSort.key === 'location') return String(p.sellerLocation || '');
     if (productSort.key === 'stage') return stageRank(p);
@@ -1028,10 +1255,10 @@ function sortProducts(products, chatIds, fineIds, coarseIds) {
 }
 
 function renderSortHeaders() {
-  ['price', 'want', 'view', 'updated', 'seller', 'location', 'stage'].forEach(key => {
+  ['price', 'priceChange', 'want', 'view', 'updated', 'sellerScore', 'firstSeen', 'seller', 'location', 'stage'].forEach(key => {
     const el = document.getElementById(`sort-${key}`);
     if (!el) return;
-    const label = { price: '价格', want: '想要', view: '浏览', updated: '来过', seller: '卖家', location: '地区', stage: '阶段' }[key];
+    const label = { price: '价格', priceChange: '变化', want: '热度', view: '浏览', updated: '时效', sellerScore: '卖家', firstSeen: '发现', seller: '卖家', location: '地区', stage: '阶段' }[key];
     const arrow = productSort.key === key ? (productSort.dir === 'asc' ? ' ↑' : ' ↓') : ' ↕';
     el.textContent = label + arrow;
     el.title = '点击排序';
@@ -1153,6 +1380,528 @@ function renderLogs() {
 function switchTab(tab) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
   document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === `tab-${tab}`));
+  if (tab === 'tracking') loadTrackedProducts();
+}
+
+// ========== Price Tracking ==========
+async function loadTrackedProducts() {
+  try {
+    const res = await fetch('/api/tracked-products');
+    trackedProducts = await res.json();
+    renderTrackedProducts();
+  } catch (err) {
+    renderTrackerError(err.message);
+  }
+}
+
+function renderTrackerError(message) {
+  const tbody = document.getElementById('tracker-tbody');
+  if (!tbody) return;
+  tbody.innerHTML = `<tr><td colspan="10" class="tracker-empty">加载失败：${escapeHtml(message)}</td></tr>`;
+}
+
+function formatMoney(value) {
+  if (value === null || value === undefined || value === '') return '-';
+  const n = Number(value);
+  return Number.isFinite(n) ? `¥${n.toFixed(n % 1 === 0 ? 0 : 2)}` : escapeHtml(String(value));
+}
+
+function formatTrackerChange(item) {
+  const change = item.priceChange || '待检查';
+  const delta = Number(item.priceDelta || 0);
+  if (change === '降价') return `<span class="price-change price-down">降 ${formatMoney(Math.abs(delta))}</span>`;
+  if (change === '涨价') return `<span class="price-change price-up">涨 ${formatMoney(Math.abs(delta))}</span>`;
+  if (change === '首次记录') return '<span class="price-change price-new">首次</span>';
+  if (change === '待检查') return '<span class="price-change muted">待检查</span>';
+  return '<span class="price-change muted">未变</span>';
+}
+
+function getTrackerHistory(item) {
+  return Array.isArray(item?.history)
+    ? item.history
+      .map(h => ({ time: Number(h.time), price: Number(h.price) }))
+      .filter(h => Number.isFinite(h.time) && Number.isFinite(h.price))
+      .sort((a, b) => a.time - b.time)
+    : [];
+}
+
+function getTrackerHistoryStats(item) {
+  const history = getTrackerHistory(item);
+  let drops = 0;
+  let rises = 0;
+  for (let i = 1; i < history.length; i += 1) {
+    if (history[i].price < history[i - 1].price) drops += 1;
+    if (history[i].price > history[i - 1].price) rises += 1;
+  }
+  return { history, drops, rises };
+}
+
+function renderTrackerQuickStats(item) {
+  const { history, drops, rises } = getTrackerHistoryStats(item);
+  if (history.length < 2) return '<div class="tracker-change-meta">暂无历史变化</div>';
+  const parts = [];
+  if (drops) parts.push(`${drops}次降价`);
+  if (rises) parts.push(`${rises}次涨价`);
+  if (!parts.length) parts.push('价格稳定');
+  return `<div class="tracker-change-meta">${escapeHtml(parts.join('，'))}</div>`;
+}
+
+function renderTrackerStatus(item) {
+  const status = String(item?.status || 'tracking');
+  const map = {
+    tracking: { label: '在售', cls: 'tracker-status-on' },
+    invalid: { label: '下架', cls: 'tracker-status-off' },
+    down: { label: '下架', cls: 'tracker-status-off' },
+    sold: { label: '售出', cls: 'tracker-status-sold' },
+    deleted: { label: '已删', cls: 'tracker-status-off' },
+  };
+  const info = map[status] || { label: '未知', cls: 'tracker-status-unknown' };
+  return `<span class="tracker-status ${info.cls}">${info.label}</span>`;
+}
+
+function findSellerProfileSource(sellerName) {
+  const name = String(sellerName || '').trim();
+  if (!name) return null;
+  for (const task of tasks) {
+    const lists = [
+      task.products?.fineFiltered,
+      task.products?.coarseFiltered,
+      task.products?.raw,
+    ];
+    for (const list of lists) {
+      const found = (list || []).find(product => String(product.sellerName || '').trim() === name);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function renderTrackerSeller(item) {
+  const manualLabel = getSellerManualLabel(item.sellerName) || item.sellerManualLabel || '';
+  const cls = manualLabel === '大卖' || manualLabel === '小B' ? 'seller-business-strong' : 'seller-unknown';
+  const profile = manualLabel
+    ? `<button class="seller-profile seller-profile-button ${cls}" data-seller="${escapeHtml(item.sellerName || '')}" title="人工标注：${escapeHtml(manualLabel)}" onclick="showSellerLabelModal(this.dataset.seller)">${escapeHtml(manualLabel)}</button>`
+    : '';
+  return `
+    <div class="tracker-seller-line">
+      ${profile}
+      <span class="tracker-seller-name">${escapeHtml(item.sellerName || '-')}</span>
+    </div>
+  `;
+}
+
+function getTrackedProductTitle(item) {
+  const title = String(item?.title || '').trim();
+  if (title && !['为你推荐', '相关推荐', '猜你喜欢'].includes(title)) return title;
+  return item?.url || '';
+}
+
+function getVisibleTrackedProducts() {
+  const query = trackerSearch.trim().toLowerCase();
+  let items = trackedProducts;
+  if (trackerOnlyStarred) {
+    items = items.filter(item => item.starred);
+  }
+  if (trackerOnlyDrops) {
+    items = items.filter(item => item.priceChange === '降价' || Number(item.priceDelta || 0) < 0);
+  }
+  if (query) {
+    items = items.filter(item => {
+      const title = getTrackedProductTitle(item).toLowerCase();
+      const seller = String(item.sellerName || '').toLowerCase();
+      return title.includes(query) || seller.includes(query);
+    });
+  }
+  return sortTrackedProducts(items);
+}
+
+function trackerNumberValue(value) {
+  if (value === 0) return 0;
+  if (value === null || value === undefined || value === '') return Number.POSITIVE_INFINITY;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : Number.POSITIVE_INFINITY;
+}
+
+function sortTrackedProducts(items) {
+  const starredRank = item => item.starred ? 0 : 1;
+  const base = [...items].sort((a, b) => starredRank(a) - starredRank(b));
+  if (!trackerSort.key) return base;
+
+  const dir = trackerSort.dir === 'desc' ? -1 : 1;
+  const valueOf = (item) => {
+    if (['currentPrice', 'firstPrice', 'lowestPrice', 'priceDelta', 'lastCheckedAt'].includes(trackerSort.key)) {
+      return trackerNumberValue(item[trackerSort.key]);
+    }
+    if (trackerSort.key === 'status') {
+      const rank = { tracking: 1, sold: 2, down: 3, invalid: 3, deleted: 4 };
+      return rank[item.status] || 99;
+    }
+    return '';
+  };
+
+  return base.sort((a, b) => {
+    const starDiff = starredRank(a) - starredRank(b);
+    if (starDiff !== 0) return starDiff;
+    const av = valueOf(a);
+    const bv = valueOf(b);
+    if (!Number.isFinite(av) && !Number.isFinite(bv)) return 0;
+    if (!Number.isFinite(av)) return 1;
+    if (!Number.isFinite(bv)) return -1;
+    return (av - bv) * dir;
+  });
+}
+
+function renderTrackerSortHeaders() {
+  ['currentPrice', 'firstPrice', 'lowestPrice', 'priceDelta', 'lastCheckedAt', 'status'].forEach(key => {
+    const el = document.getElementById(`tracker-sort-${key}`);
+    if (!el) return;
+    const label = {
+      currentPrice: '当前价',
+      firstPrice: '首次',
+      lowestPrice: '最低',
+      priceDelta: '变化',
+      lastCheckedAt: '最近检查',
+      status: '状态',
+    }[key];
+    const arrow = trackerSort.key === key ? (trackerSort.dir === 'asc' ? ' ↑' : ' ↓') : ' ↕';
+    el.textContent = label + arrow;
+    el.title = '点击排序';
+    el.classList.toggle('active', trackerSort.key === key);
+  });
+}
+
+function setTrackerSort(key) {
+  if (trackerSort.key === key) {
+    trackerSort.dir = trackerSort.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    trackerSort = { key, dir: 'asc' };
+  }
+  trackerPage = 1;
+  renderTrackedProducts();
+}
+
+function setTrackerSearch(value) {
+  trackerSearch = String(value || '');
+  trackerPage = 1;
+  renderTrackedProducts();
+}
+
+function renderTrackerFilterButtons() {
+  const starredBtn = document.getElementById('tracker-filter-starred');
+  const dropBtn = document.getElementById('tracker-filter-drops');
+  if (starredBtn) {
+    starredBtn.classList.toggle('active', trackerOnlyStarred);
+    starredBtn.textContent = trackerOnlyStarred ? '★ 星标中' : '★ 星标';
+  }
+  if (dropBtn) {
+    dropBtn.classList.toggle('active', trackerOnlyDrops);
+    dropBtn.textContent = trackerOnlyDrops ? '只看降价中' : '只看降价';
+  }
+}
+
+function toggleTrackerStarredFilter() {
+  trackerOnlyStarred = !trackerOnlyStarred;
+  trackerPage = 1;
+  renderTrackedProducts();
+}
+
+function toggleTrackerDropFilter() {
+  trackerOnlyDrops = !trackerOnlyDrops;
+  trackerPage = 1;
+  renderTrackedProducts();
+}
+
+function syncTrackerSelectAll(visibleItems) {
+  const checkbox = document.getElementById('tracker-select-all');
+  if (!checkbox) return;
+  const ids = visibleItems.map(item => item.id);
+  const selected = ids.filter(id => selectedTrackedProductIds.has(id)).length;
+  checkbox.checked = ids.length > 0 && selected === ids.length;
+  checkbox.indeterminate = selected > 0 && selected < ids.length;
+}
+
+function toggleTrackedProductSelection(id, checked) {
+  if (checked) selectedTrackedProductIds.add(id);
+  else selectedTrackedProductIds.delete(id);
+  syncTrackerSelectAll(getVisibleTrackedProducts());
+}
+
+function toggleAllTrackedProducts(checked) {
+  getVisibleTrackedProducts().forEach(item => {
+    if (checked) selectedTrackedProductIds.add(item.id);
+    else selectedTrackedProductIds.delete(item.id);
+  });
+  renderTrackedProducts();
+}
+
+function renderTrackedProducts() {
+  const tbody = document.getElementById('tracker-tbody');
+  if (!tbody) return;
+  selectedTrackedProductIds = new Set([...selectedTrackedProductIds].filter(id => trackedProducts.some(item => item.id === id)));
+  const visibleItems = getVisibleTrackedProducts();
+  renderTrackerSortHeaders();
+  renderTrackerFilterButtons();
+  syncTrackerSelectAll(visibleItems);
+  const totalPages = Math.max(1, Math.ceil(visibleItems.length / TRACKER_PAGE_SIZE));
+  if (trackerPage > totalPages) trackerPage = totalPages;
+  if (trackerPage < 1) trackerPage = 1;
+  const pageStart = (trackerPage - 1) * TRACKER_PAGE_SIZE;
+  const pageItems = visibleItems.slice(pageStart, pageStart + TRACKER_PAGE_SIZE);
+
+  if (!trackedProducts.length) {
+    tbody.innerHTML = '<tr><td colspan="11" class="tracker-empty">暂无跟踪链接</td></tr>';
+    renderTrackerPagination(0, 1, 0, 0);
+    return;
+  }
+  if (!visibleItems.length) {
+    tbody.innerHTML = '<tr><td colspan="11" class="tracker-empty">没有匹配的商品</td></tr>';
+    renderTrackerPagination(0, 1, 0, 0);
+    return;
+  }
+
+  tbody.innerHTML = pageItems.map(item => `
+    <tr>
+      <td class="tracker-check-col">
+        <input class="review-checkbox" type="checkbox" value="${escapeHtml(item.id)}" onchange="toggleTrackedProductSelection('${escapeHtml(item.id)}', this.checked)" ${selectedTrackedProductIds.has(item.id) ? 'checked' : ''}>
+      </td>
+      <td class="tracker-star-col">
+        <button class="star-btn ${item.starred ? 'active' : ''}" onclick="toggleTrackedProductStar('${escapeHtml(item.id)}', ${item.starred ? 'false' : 'true'})" title="${item.starred ? '取消星标' : '标为重点关注'}">★</button>
+      </td>
+      <td class="tracker-product">
+        <div class="tracker-product-main">
+          ${item.image ? `<img class="tracker-img" src="${escapeHtml(item.image)}" loading="lazy" onclick="showImagePreview('${escapeHtml(item.image)}')" alt="">` : '<div class="tracker-img tracker-img-empty"></div>'}
+          <div class="tracker-product-text">
+            <div class="tracker-title">
+              <button class="title-link" data-href="${escapeHtml(item.url)}" onclick="openProductPage(this.dataset.href)">
+                ${escapeHtml(getTrackedProductTitle(item))}
+              </button>
+            </div>
+            <div class="tracker-meta">${renderTrackerSeller(item)}</div>
+          </div>
+        </div>
+      </td>
+      <td class="product-price">${formatMoney(item.currentPrice)}</td>
+      <td>${formatMoney(item.firstPrice)}</td>
+      <td>${formatMoney(item.lowestPrice)}</td>
+      <td>${formatTrackerChange(item)}${renderTrackerQuickStats(item)}</td>
+      <td class="updated-cell">${escapeHtml(formatTimeAgo(item.lastCheckedAt))}</td>
+      <td>${renderTrackerStatus(item)}</td>
+      <td>${escapeHtml(item.note || '')}</td>
+      <td>
+        <div class="tracker-actions">
+          <button class="btn btn-sm" onclick="checkTrackedProduct('${escapeHtml(item.id)}')" ${trackerBusy ? 'disabled' : ''}>检查</button>
+          <button class="btn btn-sm" onclick="showTrackerHistoryModal('${escapeHtml(item.id)}')">历史</button>
+          <button class="btn btn-sm btn-danger" onclick="deleteTrackedProduct('${escapeHtml(item.id)}')" ${trackerBusy ? 'disabled' : ''}>删除</button>
+        </div>
+      </td>
+    </tr>
+  `).join('');
+
+  renderTrackerPagination(visibleItems.length, totalPages, pageStart, pageItems.length);
+}
+
+function renderTrackerPagination(total, totalPages, pageStart, pageCount) {
+  const container = document.getElementById('tracker-pagination');
+  if (!container) return;
+
+  if (total === 0) {
+    container.innerHTML = '<span class="pagination-info">暂无记录</span>';
+    return;
+  }
+
+  const from = pageStart + 1;
+  const to = pageStart + pageCount;
+  container.innerHTML = `
+    <span class="pagination-info">显示 ${from}-${to} / ${total} 条，每页 ${TRACKER_PAGE_SIZE} 条</span>
+    <div class="pagination-buttons">
+      <button class="btn btn-sm" onclick="setTrackerPage(1)" ${trackerPage === 1 ? 'disabled' : ''}>首页</button>
+      <button class="btn btn-sm" onclick="setTrackerPage(${trackerPage - 1})" ${trackerPage === 1 ? 'disabled' : ''}>上一页</button>
+      <span class="pagination-page">第 ${trackerPage} / ${totalPages} 页</span>
+      <button class="btn btn-sm" onclick="setTrackerPage(${trackerPage + 1})" ${trackerPage === totalPages ? 'disabled' : ''}>下一页</button>
+      <button class="btn btn-sm" onclick="setTrackerPage(${totalPages})" ${trackerPage === totalPages ? 'disabled' : ''}>末页</button>
+    </div>
+  `;
+}
+
+function setTrackerPage(page) {
+  trackerPage = page;
+  renderTrackedProducts();
+}
+
+function formatTrackerTime(value) {
+  const time = Number(value);
+  if (!Number.isFinite(time) || time <= 0) return '-';
+  return new Date(time).toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+function showTrackerHistoryModal(id) {
+  const item = trackedProducts.find(p => p.id === id);
+  if (!item) return;
+
+  const history = getTrackerHistory(item);
+  const { drops, rises } = getTrackerHistoryStats(item);
+  const title = document.getElementById('tracker-history-title');
+  const summary = document.getElementById('tracker-history-summary');
+  const tbody = document.getElementById('tracker-history-tbody');
+  if (!title || !summary || !tbody) return;
+
+  title.textContent = getTrackedProductTitle(item) || '价格历史';
+  summary.innerHTML = `
+    <span>当前 ${formatMoney(item.currentPrice)}</span>
+    <span>首次 ${formatMoney(item.firstPrice)}</span>
+    <span>最低 ${formatMoney(item.lowestPrice)}</span>
+    <span>${history.length} 条记录</span>
+    <span>${drops} 次降价</span>
+    <span>${rises} 次涨价</span>
+  `;
+
+  if (!history.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="tracker-empty">还没有价格记录，先检查一次商品即可生成历史</td></tr>';
+  } else {
+    tbody.innerHTML = history.slice().reverse().map((entry, index, rows) => {
+      const previous = rows[index + 1];
+      const delta = previous ? entry.price - previous.price : 0;
+      const change = delta < 0
+        ? `<span class="price-change price-down">降 ${formatMoney(Math.abs(delta))}</span>`
+        : delta > 0
+          ? `<span class="price-change price-up">涨 ${formatMoney(Math.abs(delta))}</span>`
+          : '<span class="price-change muted">首次</span>';
+      return `
+        <tr>
+          <td>${escapeHtml(formatTrackerTime(entry.time))}</td>
+          <td class="product-price">${formatMoney(entry.price)}</td>
+          <td>${change}</td>
+          <td>${index === 0 ? '最新' : ''}</td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  document.getElementById('tracker-history-modal-overlay')?.classList.add('show');
+}
+
+function hideTrackerHistoryModal() {
+  document.getElementById('tracker-history-modal-overlay')?.classList.remove('show');
+}
+
+async function addTrackedProductFromInput() {
+  const urlInput = document.getElementById('tracker-url');
+  const url = urlInput.value.trim();
+  if (!url) {
+    alert('请先粘贴商品链接');
+    return;
+  }
+  try {
+    const res = await fetch('/api/tracked-products', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '添加失败');
+    trackedProducts = data.items || [];
+    urlInput.value = '';
+    renderTrackedProducts();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+async function addProductToTrackerFromList(url, title = '') {
+  if (!url) {
+    alert('这个商品没有可跟踪的链接');
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/tracked-products', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, title }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '加入价格跟踪失败');
+    trackedProducts = data.items || [];
+    renderTrackedProducts();
+    renderProducts();
+  } catch (err) {
+    alert(`加入价格跟踪失败：${err.message}`);
+  }
+}
+
+async function checkTrackedProduct(id) {
+  trackerBusy = true;
+  renderTrackedProducts();
+  try {
+    const res = await fetch(`/api/tracked-products/${id}/check`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '检查失败');
+    trackedProducts = data.items || [];
+  } catch (err) {
+    alert(err.message);
+  } finally {
+    trackerBusy = false;
+    renderTrackedProducts();
+  }
+}
+
+async function checkSelectedTrackedProducts() {
+  const ids = [...selectedTrackedProductIds].filter(id => trackedProducts.some(item => item.id === id));
+  if (!ids.length) {
+    alert('请先选择要检查的商品');
+    return;
+  }
+  trackerBusy = true;
+  renderTrackedProducts();
+  try {
+    for (const id of ids) {
+      const res = await fetch(`/api/tracked-products/${id}/check`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '检查失败');
+      trackedProducts = data.items || trackedProducts;
+      renderTrackedProducts();
+    }
+  } catch (err) {
+    alert(err.message);
+  } finally {
+    trackerBusy = false;
+    renderTrackedProducts();
+  }
+}
+
+async function toggleTrackedProductStar(id, starred) {
+  try {
+    const res = await fetch(`/api/tracked-products/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ starred }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '星标保存失败');
+    trackedProducts = data.items || trackedProducts;
+    renderTrackedProducts();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+async function deleteTrackedProduct(id) {
+  if (!confirm('确认删除这个价格跟踪？')) return;
+  try {
+    const res = await fetch(`/api/tracked-products/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '删除失败');
+    trackedProducts = data.items || [];
+    renderTrackedProducts();
+  } catch (err) {
+    alert(err.message);
+  }
 }
 
 // ========== Modal ==========
@@ -1177,9 +1926,10 @@ function hideCreateModal() {
 }
 
 function clearForm() {
-  ['f-name', 'f-queries', 'f-price-min', 'f-price-max', 'f-region', 'f-want-max', 'f-title-exclude', 'f-requirements', 'f-chat-strategy'].forEach(id => {
+  ['f-name', 'f-group', 'f-queries', 'f-price-min', 'f-price-max', 'f-region', 'f-want-max', 'f-title-exclude', 'f-requirements', 'f-chat-strategy'].forEach(id => {
     document.getElementById(id).value = '';
   });
+  document.getElementById('f-group').value = activeTaskGroup !== '全部' ? activeTaskGroup : '未分组';
   document.getElementById('f-pages').value = '3';
   document.getElementById('f-personal').checked = false;
   document.getElementById('f-free-shipping').checked = false;
@@ -1220,6 +1970,12 @@ function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+function getTaskGroup(task) {
+  if (task?.group) return task.group;
+  if ((task?.name || '').includes('宝可梦')) return '宝可梦';
+  return '未分组';
+}
+
 // ========== Model Switching ==========
 async function loadModel() {
   try {
@@ -1249,3 +2005,4 @@ document.addEventListener('click', closeRerunMenus);
 loadDefaults();
 loadProviders().then(() => loadCurrentConfig());
 loadModel();
+loadTrackedProducts();

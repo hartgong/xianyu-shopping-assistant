@@ -3,8 +3,15 @@ import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { spawn } from 'child_process';
 import { TaskManager } from './lib/task.mjs';
+import {
+  addTrackedProduct,
+  checkAllTrackedProducts,
+  checkTrackedProduct,
+  deleteTrackedProduct,
+  listTrackedProducts,
+  updateTrackedProduct,
+} from './lib/tracker.mjs';
 import {
   DEFAULT_PERSONA, DEFAULT_COARSE_PROMPT, DEFAULT_FINE_PROMPT,
   getCurrentModel, setCurrentModel, getAvailableModels,
@@ -47,30 +54,6 @@ function broadcast(msg) {
   }
 }
 
-function openInDefaultBrowser(url) {
-  const platform = process.platform;
-  let command;
-  let args;
-
-  if (platform === 'win32') {
-    command = 'cmd';
-    args = ['/c', 'start', '', url];
-  } else if (platform === 'darwin') {
-    command = 'open';
-    args = [url];
-  } else {
-    command = 'xdg-open';
-    args = [url];
-  }
-
-  const child = spawn(command, args, {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-  });
-  child.unref();
-}
-
 const taskManager = new TaskManager(broadcast);
 
 // ========== Config API ==========
@@ -83,7 +66,7 @@ app.get('/api/config', (req, res) => {
 });
 
 app.post('/api/config', (req, res) => {
-  const { provider, apiKey, baseUrl, model, customModels, sellerBlacklist } = req.body;
+  const { provider, apiKey, baseUrl, model, customModels, sellerBlacklist, sellerManualLabels } = req.body;
   const update = {};
   if (provider !== undefined) update.provider = provider;
   if (apiKey !== undefined) update.apiKey = apiKey;
@@ -91,6 +74,7 @@ app.post('/api/config', (req, res) => {
   if (model !== undefined) update.model = model;
   if (customModels !== undefined) update.customModels = customModels;
   if (sellerBlacklist !== undefined) update.sellerBlacklist = sellerBlacklist;
+  if (sellerManualLabels !== undefined) update.sellerManualLabels = sellerManualLabels;
 
   saveConfig(update);
   broadcast({
@@ -211,6 +195,60 @@ app.delete('/api/tasks/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+function clientErrorMessage(err) {
+  const message = String(err?.message || err || '');
+  if (/launchPersistentContext|Target page, context or browser has been closed/i.test(message)) {
+    return '浏览器启动失败。请先关闭残留的自动化 Chromium 窗口，或重启本服务后再检查。';
+  }
+  return message.split('\n')[0] || '操作失败';
+}
+
+// ========== Price Tracker API ==========
+app.get('/api/tracked-products', (req, res) => {
+  res.json(listTrackedProducts());
+});
+
+app.post('/api/tracked-products', (req, res) => {
+  try {
+    const item = addTrackedProduct(req.body.url, req.body.note || '', req.body.title || '');
+    res.json({ ok: true, item, items: listTrackedProducts() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/tracked-products/check-all', async (req, res) => {
+  try {
+    const results = await checkAllTrackedProducts();
+    res.json({ ok: true, results, items: listTrackedProducts() });
+  } catch (err) {
+    res.status(500).json({ error: clientErrorMessage(err) });
+  }
+});
+
+app.post('/api/tracked-products/:id/check', async (req, res) => {
+  try {
+    const item = await checkTrackedProduct(req.params.id);
+    res.json({ ok: true, item, items: listTrackedProducts() });
+  } catch (err) {
+    res.status(500).json({ error: clientErrorMessage(err) });
+  }
+});
+
+app.patch('/api/tracked-products/:id', (req, res) => {
+  try {
+    const item = updateTrackedProduct(req.params.id, req.body || {});
+    res.json({ ok: true, item, items: listTrackedProducts() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/tracked-products/:id', (req, res) => {
+  deleteTrackedProduct(req.params.id);
+  res.json({ ok: true, items: listTrackedProducts() });
+});
+
 app.get('/api/default-persona', (req, res) => {
   res.json({ persona: DEFAULT_PERSONA });
 });
@@ -233,24 +271,6 @@ app.post('/api/model', (req, res) => {
   if (!ok) return res.status(400).json({ error: '不支持的模型' });
   broadcast({ event: 'model:changed', data: { current: getCurrentModel(), models: getAvailableModels() } });
   res.json({ ok: true, current: getCurrentModel() });
-});
-
-app.post('/api/open-product', async (req, res) => {
-  try {
-    const rawUrl = String(req.body?.url || '').trim();
-    if (!rawUrl) return res.status(400).json({ error: '缺少商品链接' });
-
-    const url = new URL(rawUrl);
-    const allowedHosts = ['www.goofish.com', 'goofish.com', '2.taobao.com', 'item.taobao.com'];
-    if (!['http:', 'https:'].includes(url.protocol) || !allowedHosts.includes(url.hostname)) {
-      return res.status(400).json({ error: '只支持打开闲鱼/淘宝商品链接' });
-    }
-
-    openInDefaultBrowser(url.toString());
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: `打开商品页失败: ${err.message}` });
-  }
 });
 
 server.listen(PORT, () => {
