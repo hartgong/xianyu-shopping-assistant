@@ -4,6 +4,7 @@ import { WebSocketServer } from 'ws';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { TaskManager } from './lib/task.mjs';
+import { closeBrowser } from './lib/browser.mjs';
 import {
   addTrackedProduct,
   checkAllTrackedProducts,
@@ -13,7 +14,7 @@ import {
   updateTrackedProduct,
 } from './lib/tracker.mjs';
 import {
-  DEFAULT_PERSONA, DEFAULT_COARSE_PROMPT, DEFAULT_FINE_PROMPT,
+  DEFAULT_PERSONA,
   getCurrentModel, setCurrentModel, getAvailableModels,
 } from './lib/ai.mjs';
 import {
@@ -27,7 +28,7 @@ const app = express();
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
 
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 const clients = new Set();
@@ -55,6 +56,24 @@ function broadcast(msg) {
 }
 
 const taskManager = new TaskManager(broadcast);
+let shuttingDown = false;
+
+async function gracefulShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`\n🛑 收到 ${signal}，正在正常关闭 Chromium…`);
+
+  // 必须先关闭持久 Chromium 上下文，让它写入正常退出标记；
+  // 不能直接结束 Node 进程，否则下次会显示“未正确关闭”。
+  await closeBrowser().catch(err => console.error('关闭 Chromium 失败:', err.message));
+  for (const ws of clients) ws.close();
+
+  await new Promise(resolve => server.close(resolve));
+  process.exit(0);
+}
+
+process.once('SIGINT', () => { void gracefulShutdown('SIGINT'); });
+process.once('SIGTERM', () => { void gracefulShutdown('SIGTERM'); });
 
 // ========== Config API ==========
 app.get('/api/providers', (req, res) => {
@@ -66,7 +85,7 @@ app.get('/api/config', (req, res) => {
 });
 
 app.post('/api/config', (req, res) => {
-  const { provider, apiKey, baseUrl, model, customModels, sellerBlacklist, sellerManualLabels } = req.body;
+  const { provider, apiKey, baseUrl, model, customModels, sellerBlacklist, sellerManualLabels, sellerLexicon, sellerFineRules, sellerProfiles } = req.body;
   const update = {};
   if (provider !== undefined) update.provider = provider;
   if (apiKey !== undefined) update.apiKey = apiKey;
@@ -75,6 +94,9 @@ app.post('/api/config', (req, res) => {
   if (customModels !== undefined) update.customModels = customModels;
   if (sellerBlacklist !== undefined) update.sellerBlacklist = sellerBlacklist;
   if (sellerManualLabels !== undefined) update.sellerManualLabels = sellerManualLabels;
+  if (sellerLexicon !== undefined) update.sellerLexicon = sellerLexicon;
+  if (sellerFineRules !== undefined) update.sellerFineRules = sellerFineRules;
+  if (sellerProfiles !== undefined) update.sellerProfiles = sellerProfiles;
 
   saveConfig(update);
   broadcast({
@@ -82,6 +104,52 @@ app.post('/api/config', (req, res) => {
     data: { configured: isConfigured(), config: getSafeConfig() },
   });
   res.json({ ok: true, config: getSafeConfig() });
+});
+
+app.post('/api/sellers/label', (req, res) => {
+  try {
+    const seller = req.body?.seller || {};
+    const label = String(req.body?.label || '').trim();
+    const sellerId = String(seller.sellerId || '').trim();
+    const fingerprint = String(seller.sellerFingerprint || '').trim();
+    const sellerName = String(seller.sellerName || '').trim();
+    const keys = [sellerId && `id:${sellerId}`, fingerprint && `avatar:${fingerprint}`, sellerName && `name:${sellerName.toLowerCase()}`, sellerName && sellerName.toLowerCase(), sellerName].filter(Boolean);
+    if (!keys.length) return res.status(400).json({ error: '缺少可标记的卖家身份' });
+
+    const cfg = getConfig();
+    const sellerManualLabels = { ...(cfg.sellerManualLabels || {}) };
+    const sellerProfiles = { ...(cfg.sellerProfiles || {}) };
+    const existing = keys.map(key => sellerProfiles[key]).filter(Boolean).sort((a, b) => Number(b.checkedAt || 0) - Number(a.checkedAt || 0))[0] || {};
+    const profile = {
+      ...existing,
+      sellerId: sellerId || existing.sellerId || '', sellerName: sellerName || existing.sellerName || '',
+      sellerFingerprint: fingerprint || existing.sellerFingerprint || '', sellerAvatarUrl: seller.sellerAvatarUrl || existing.sellerAvatarUrl || '',
+      sellerLocation: seller.sellerLocation || existing.sellerLocation || '', sellerRating: seller.sellerRating || existing.sellerRating || '',
+      sellerDealCount: seller.sellerDealCount ?? existing.sellerDealCount ?? null, sellerListedCount: seller.sellerListedCount ?? existing.sellerListedCount ?? null,
+      sellerType: label || existing.sellerType || '不明确', sellerManualLabel: label,
+      sellerProfileReason: label ? `人工标注：${label}` : (existing.sellerProfileReason || ''), checkedAt: Date.now(),
+    };
+    keys.forEach(key => {
+      if (label) sellerManualLabels[key] = label;
+      else delete sellerManualLabels[key];
+      sellerProfiles[key] = profile;
+    });
+    saveConfig({ sellerManualLabels, sellerProfiles });
+    broadcast({ event: 'config:changed', data: { configured: isConfigured(), config: getSafeConfig() } });
+    res.json({ ok: true, config: getSafeConfig() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/sellers/refresh', async (req, res) => {
+  try {
+    const product = await taskManager.refreshSellerProfile(req.body || {});
+    broadcast({ event: 'config:changed', data: { configured: isConfigured(), config: getSafeConfig() } });
+    res.json({ ok: true, product, config: getSafeConfig() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 app.post('/api/config/test', async (req, res) => {
@@ -130,20 +198,21 @@ app.get('/api/tasks/:id', (req, res) => {
 });
 
 app.post('/api/tasks', (req, res) => {
-  if (!isConfigured()) {
-    return res.status(400).json({ error: '请先在设置中配置 AI API' });
+  const { startImmediately = true, ...taskConfig } = req.body || {};
+  if (taskConfig.runStages?.inquiry && !isConfigured()) {
+    return res.status(400).json({ error: '已勾选 AI 询价，请先在设置中配置 AI API' });
   }
-  const task = taskManager.createTask(req.body);
-  taskManager.startTask(task.id);
+  const task = taskManager.createTask(taskConfig);
+  if (startImmediately) taskManager.startTask(task.id);
   res.json(task);
 });
 
 app.post('/api/tasks/:id/start', (req, res) => {
-  if (!isConfigured()) {
-    return res.status(400).json({ error: '请先在设置中配置 AI API' });
-  }
   const task = taskManager.getTask(req.params.id);
   if (!task) return res.status(404).json({ error: 'Task not found' });
+  if (task.config?.runStages?.inquiry && !isConfigured()) {
+    return res.status(400).json({ error: '已勾选 AI 询价，请先在设置中配置 AI API' });
+  }
   const updates = {};
   if (req.body.chatStrategy !== undefined) updates.chatStrategy = req.body.chatStrategy;
   if (req.body.persona !== undefined) updates.persona = req.body.persona;
@@ -256,8 +325,6 @@ app.get('/api/default-persona', (req, res) => {
 app.get('/api/defaults', (req, res) => {
   res.json({
     persona: DEFAULT_PERSONA,
-    coarsePrompt: DEFAULT_COARSE_PROMPT,
-    finePrompt: DEFAULT_FINE_PROMPT,
   });
 });
 

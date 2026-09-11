@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>VLG</title>
-  <link rel="stylesheet" href="style.css?v=40">
+  <link rel="stylesheet" href="style.css?v=42">
 </head>
 <body>
   <div id="app">
@@ -23,9 +23,11 @@
           <button class="btn" onclick="toggleSettingsMenu(event)" id="settings-btn">设置</button>
           <div class="settings-dropdown" id="settings-dropdown">
             <button onclick="openApiSettings()">API 设置</button>
+            <button onclick="openSellerLexiconSettings()">二奢卖家词库</button>
             <button onclick="openBlacklistSettings()">商家黑名单</button>
           </div>
         </div>
+        <button class="btn" onclick="openMerchantPool()">卖家池</button>
         <button class="btn btn-primary" onclick="openNewTaskModal()">+ 新建任务</button>
       </div>
     </header>
@@ -76,10 +78,9 @@
                     <th>图片</th>
                     <th class="title-col">标题</th>
                     <th><button class="sort-header" onclick="setProductSort('price')" id="sort-price" title="点击排序">价格</button></th>
-                    <th><button class="sort-header" onclick="setProductSort('priceChange')" id="sort-priceChange" title="点击排序">变化</button></th>
-                    <th><button class="sort-header" onclick="setProductSort('want')" id="sort-want" title="点击排序">热度</button></th>
+                    <th class="list-flags-col">列表筛选标识</th>
                     <th><button class="sort-header" onclick="setProductSort('updated')" id="sort-updated" title="点击排序">时效</button></th>
-                    <th><button class="sort-header" onclick="setProductSort('sellerScore')" id="sort-sellerScore" title="点击排序">卖家</button></th>
+                    <th><button class="sort-header" onclick="setProductSort('sellerScore')" id="sort-sellerScore" title="点击按卖家等级排序">卖家等级</button></th>
                     <th>操作</th>
                   </tr>
                 </thead>
@@ -255,6 +256,62 @@
   </div>
 
   <!-- Seller Blacklist Modal -->
+  <div class="modal-overlay" id="merchant-pool-modal-overlay" onclick="hideMerchantPool()">
+    <div class="modal merchant-pool-modal" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h2>卖家池</h2>
+        <button class="modal-close" onclick="hideMerchantPool()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="settings-desc">跨任务沉淀的闲鱼卖家档案。每个已采集商品的卖家都会进入此处，不会额外访问闲鱼。</p>
+        <div class="merchant-pool-toolbar">
+          <div class="merchant-pool-summary" id="merchant-pool-summary"></div>
+          <div class="merchant-pool-filters">
+            <button class="btn btn-sm" id="merchant-filter-all" onclick="setMerchantPoolFilter('all')">全部</button>
+            <button class="btn btn-sm" id="merchant-filter-confirmed" onclick="setMerchantPoolFilter('小B')">小B</button>
+            <button class="btn btn-sm" id="merchant-filter-personal" onclick="setMerchantPoolFilter('个人卖家')">个人卖家</button>
+            <button class="btn btn-sm" id="merchant-filter-suspected" onclick="setMerchantPoolFilter('疑似小B')">疑似小B</button>
+            <button class="btn btn-sm" id="merchant-filter-suspected-personal" onclick="setMerchantPoolFilter('疑似个人卖家')">疑似个人</button>
+            <button class="btn btn-sm" id="merchant-filter-unknown" onclick="setMerchantPoolFilter('不明确')">不明确</button>
+          </div>
+        </div>
+        <div class="merchant-search-wrap">
+          <span>⌕</span><input id="merchant-pool-search" type="search" placeholder="搜索卖家昵称、ID、头像指纹、商品标题或判断证据" oninput="setMerchantPoolSearch(this.value)"><button class="merchant-search-clear" type="button" onclick="clearMerchantPoolSearch()">清空</button>
+        </div>
+        <div class="merchant-pool-table-wrap">
+          <table class="product-table merchant-pool-table">
+            <colgroup>
+              <col class="merchant-col-seller"><col class="merchant-col-level"><col class="merchant-col-data"><col class="merchant-col-evidence"><col class="merchant-col-product"><col class="merchant-col-updated"><col class="merchant-col-actions">
+            </colgroup>
+            <thead><tr><th>卖家档案</th><th>等级</th><th>经营数据</th><th>判断证据</th><th>最近商品</th><th>更新时间</th><th>操作</th></tr></thead>
+            <tbody id="merchant-pool-tbody"></tbody>
+          </table>
+        </div>
+        <div class="pagination merchant-pagination" id="merchant-pool-pagination"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Seller Blacklist Modal -->
+  <div class="modal-overlay" id="seller-lexicon-modal-overlay" onclick="hideSellerLexiconModal()">
+    <div class="modal settings-modal" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h2>二奢卖家词库</h2>
+        <button class="modal-close" onclick="hideSellerLexiconModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="settings-desc">每行一个词。经营词只检查卖家名称和店铺简介；二奢商品词只统计卖家真实在售列表的标题占比。两类证据命中都会标为“疑似小B”，等待人工确认。</p>
+        <div class="form-group"><label>二奢经营词（卖家名称／店铺简介）</label><textarea id="seller-business-words" rows="8"></textarea></div>
+        <div class="form-group"><label>二奢商品词（用于卖家在售占比）</label><textarea id="seller-luxury-product-words" rows="7"></textarea></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="hideSellerLexiconModal()">取消</button>
+        <button class="btn btn-primary" onclick="saveSellerLexicon()">保存词库</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Seller Blacklist Modal -->
   <div class="modal-overlay" id="blacklist-modal-overlay" onclick="hideBlacklistModal()">
     <div class="modal settings-modal" onclick="event.stopPropagation()">
       <div class="modal-header">
@@ -286,7 +343,10 @@
         <p class="settings-desc" id="seller-label-desc"></p>
         <div class="seller-label-actions">
           <button class="btn" onclick="saveSellerManualLabel('小B')">标为小B</button>
-          <button class="btn" onclick="saveSellerManualLabel('大卖')">标为大卖</button>
+          <button class="btn" onclick="saveSellerManualLabel('个人卖家')">标为个人卖家</button>
+          <button class="btn" onclick="saveSellerManualLabel('疑似小B')">标为疑似小B</button>
+          <button class="btn" onclick="saveSellerManualLabel('疑似个人卖家')">标为疑似个人卖家</button>
+          <button class="btn" onclick="saveSellerManualLabel('不明确')">标为不明确</button>
           <button class="btn" onclick="saveSellerManualLabel('')">清除标注</button>
         </div>
       </div>
@@ -306,29 +366,33 @@
           <div class="form-row">
             <div class="form-group">
               <label>任务名</label>
-              <input id="f-name" type="text" placeholder="M4 MacBook Air">
+              <input id="f-name" type="text" placeholder="LV">
             </div>
             <div class="form-group">
               <label>分组</label>
-              <input id="f-group" type="text" placeholder="宝可梦">
+              <select id="f-group" onchange="handleTaskGroupSelect(this)"><option value="未分组">未分组</option></select>
             </div>
             <div class="form-group">
               <label>最大页数</label>
-              <input id="f-pages" type="number" value="3" min="1" max="20">
+              <input id="f-pages" type="number" value="1" min="1" step="1" inputmode="numeric">
             </div>
           </div>
           <div class="form-group">
-            <label>关键词</label>
-            <input id="f-queries" type="text" placeholder="MacBook Air M4, macbook air 13">
+            <label>关键词组（每组内 AND；每个已填写的组分别搜索一次）</label>
+            <input id="f-query-group-1" type="text" placeholder="第 1 组，例如：LV 老花 Speedy">
+            <input id="f-query-group-2" type="text" placeholder="第 2 组（可选）">
+            <input id="f-query-group-3" type="text" placeholder="第 3 组（可选）">
+            <input id="f-query-group-4" type="text" placeholder="第 4 组（可选）">
           </div>
         </section>
 
         <section class="form-section">
           <div class="section-title">粗筛</div>
+          <div class="form-group"><label>列表排序</label><select id="f-search-sort"><option value="comprehensive">综合</option><option value="newest" selected>新发布</option><option value="priceDrop">新降价</option></select></div>
           <div class="form-row compact-row">
             <div class="form-group">
               <label>最低价</label>
-              <input id="f-price-min" type="number" placeholder="不限">
+              <input id="f-price-min" type="number" value="500" placeholder="不限">
             </div>
             <div class="form-group">
               <label>最高价</label>
@@ -346,48 +410,44 @@
             </div>
             <div class="form-group">
               <label>标题排除</label>
-              <input id="f-title-exclude" type="text" placeholder="求购、维修、配件">
+              <input id="f-title-exclude" type="text" value="求购、维修、养护、配件" placeholder="求购、维修、养护、配件">
             </div>
           </div>
           <div class="inline-checks">
             <label><input id="f-personal" type="checkbox"> 个人闲置</label>
+            <label><input id="f-inspect" type="checkbox"> 验货宝</label>
+            <label><input id="f-guarantee" type="checkbox"> 验号担保</label>
             <label><input id="f-free-shipping" type="checkbox"> 包邮</label>
-            <label><input id="f-coarse-semantic" type="checkbox"> 标题语义筛</label>
+            <label><input id="f-super-shop" type="checkbox"> 超赞鱼小铺</label>
+            <label><input id="f-brand-new" type="checkbox"> 全新</label>
+            <label><input id="f-strict-select" type="checkbox"> 严选</label>
+            <label><input id="f-resale" type="checkbox"> 转卖</label>
           </div>
         </section>
 
         <section class="form-section">
           <div class="section-title">细筛</div>
           <div class="form-group">
-            <label>需求描述</label>
-            <textarea id="f-requirements" rows="3" placeholder="成色、电池、配件、避雷点等"></textarea>
+            <p class="hint">细筛只寻找二奢小B：卖家名称／简介命中经营词，或真实在售标题的二奢数量／占比达到阈值，即标为疑似小B，等待人工确认。交易量、在售总量、个人词和闲置词均不参与判断。</p>
           </div>
-        </section>
-
-        <section class="form-section">
-          <div class="section-title">聊天</div>
-          <div class="form-group">
-            <label>谈价策略</label>
-            <textarea id="f-chat-strategy" rows="3" placeholder="心理价位、让步空间、是否争取包邮"></textarea>
+          <div class="form-row compact-row">
+            <div class="form-group"><label>在售采样数（件）</label><input id="f-luxury-sample-size" type="number" min="1" max="50" value="20"></div>
+            <div class="form-group"><label>二奢数量阈值（件）</label><input id="f-luxury-count-threshold" type="number" min="1" value="5"></div>
+            <div class="form-group"><label>二奢占比阈值（%）</label><input id="f-luxury-ratio-threshold" type="number" min="0" max="100" value="40"></div>
+            <div class="form-group"><label>高风险占比提示（%）</label><input id="f-luxury-high-ratio-threshold" type="number" min="0" max="100" value="60"></div>
           </div>
         </section>
 
         <details class="advanced-section">
-          <summary class="advanced-toggle">高级</summary>
-          <div class="form-group" style="margin-top:12px">
-            <label>标题语义筛 Prompt</label>
-            <textarea id="f-coarse-prompt" rows="4" class="persona-editor"></textarea>
-            <div class="persona-actions">
-              <button type="button" class="btn btn-sm" onclick="resetCoarsePrompt()">恢复默认</button>
-            </div>
-          </div>
+          <summary class="advanced-toggle">聊天</summary>
           <div class="form-group">
-            <label>细筛 Prompt</label>
-            <textarea id="f-fine-prompt" rows="4" class="persona-editor"></textarea>
-            <div class="persona-actions">
-              <button type="button" class="btn btn-sm" onclick="resetFinePrompt()">恢复默认</button>
-            </div>
+            <label>谈价策略</label>
+            <textarea id="f-chat-strategy" rows="3" placeholder="心理价位、让步空间、是否争取包邮"></textarea>
           </div>
+        </details>
+
+        <details class="advanced-section">
+          <summary class="advanced-toggle">AI 询价设置</summary>
           <div class="form-group">
             <label>聊天人设</label>
             <textarea id="f-persona" rows="8" class="persona-editor"></textarea>
@@ -397,8 +457,18 @@
           </div>
         </details>
       </div>
+      <div class="modal-body task-stage-area">
+        <div class="task-stage-title">本次执行阶段</div>
+        <div class="task-stage-options">
+          <label class="task-stage-option"><input id="f-stage-collect" type="checkbox" checked><span>采集</span></label>
+          <label class="task-stage-option"><input id="f-stage-coarse" type="checkbox" checked><span>粗筛</span></label>
+          <label class="task-stage-option"><input id="f-stage-fine" type="checkbox" checked><span>细筛</span></label>
+          <label class="task-stage-option"><input id="f-stage-inquiry" type="checkbox"><span>AI 询价</span></label>
+        </div>
+      </div>
       <div class="modal-footer">
         <button class="btn" onclick="hideCreateModal()">取消</button>
+        <button class="btn" id="task-modal-create-only" onclick="createTask(false)">仅创建</button>
         <button class="btn btn-primary" id="task-modal-submit" onclick="createTask()">创建并启动</button>
       </div>
     </div>
@@ -429,6 +499,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=51"></script>
+  <script src="app.js?v=87"></script>
 </body>
 </html>

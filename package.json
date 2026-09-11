@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
-    "dev": "node --watch server.mjs"
+    "dev": "node --watch server.mjs",
+    "reset:test-data": "node scripts/reset-test-data.mjs"
   },
   "engines": {
     "node": ">=18.0.0"

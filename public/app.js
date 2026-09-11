@@ -2,6 +2,7 @@
 let ws = null;
 let tasks = [];
 let activeTaskId = null;
+let hasInitializedTaskSelection = false;
 let defaultPersona = '';
 let defaultCoarsePrompt = '';
 let defaultFinePrompt = '';
@@ -12,7 +13,7 @@ let productFilter = 'fine';
 let editingTaskId = null;
 let productPage = 1;
 let productSort = { key: '', dir: 'asc' };
-let labelingSellerName = '';
+let labelingSeller = null;
 let activeTaskGroup = '全部';
 let trackedProducts = [];
 let trackerBusy = false;
@@ -21,6 +22,10 @@ let trackerSort = { key: '', dir: 'asc' };
 let trackerOnlyStarred = false;
 let trackerOnlyDrops = false;
 let trackerPage = 1;
+let merchantPoolPage = 1;
+let merchantPoolSearch = '';
+let merchantPoolFilter = 'all';
+let merchantPoolVisibleRows = [];
 let selectedTrackedProductIds = new Set();
 const PRODUCT_PAGE_SIZE = 50;
 const TRACKER_PAGE_SIZE = 50;
@@ -69,6 +74,11 @@ function handleWSMessage(msg) {
       if (data?.tasks) {
         tasks = data.tasks;
         renderTaskList();
+        // 页面首次加载时固定选中任务列表的第一项；WebSocket 断线重连不改变用户当前选择。
+        if (!hasInitializedTaskSelection && tasks.length > 0) {
+          hasInitializedTaskSelection = true;
+          selectTask(tasks[0].id);
+        }
       }
       if (data?.configured === false) {
         showConfigBanner();
@@ -156,6 +166,7 @@ function updateProductCounts(taskId, data) {
   task.products.rawCount = data.rawCount;
   task.products.coarseCount = data.coarseCount;
   task.products.fineCount = data.fineCount;
+  task.products.fineReviewedCount = data.fineReviewedCount;
   if (data.raw) task.products.raw = data.raw;
   if (data.coarseFiltered) task.products.coarseFiltered = data.coarseFiltered;
   if (data.fineFiltered) task.products.fineFiltered = data.fineFiltered;
@@ -222,6 +233,196 @@ function openBlacklistSettings() {
   document.getElementById('blacklist-modal-overlay').classList.add('show');
 }
 
+function openSellerLexiconSettings() {
+  closeSettingsMenu();
+  const lexicon = currentConfig.sellerLexicon || {};
+  document.getElementById('seller-business-words').value = (lexicon.businessWords || []).join('\n');
+  document.getElementById('seller-luxury-product-words').value = (lexicon.luxuryProductWords || []).join('\n');
+  document.getElementById('seller-lexicon-modal-overlay').classList.add('show');
+}
+
+function hideSellerLexiconModal() {
+  document.getElementById('seller-lexicon-modal-overlay').classList.remove('show');
+}
+
+const SELLER_FINE_RULE_FIELDS = {
+  personalThreshold: 'fine-personal-threshold', businessThreshold: 'fine-business-threshold',
+  dealPersonalMax: 'fine-deal-personal', dealLightMax: 'fine-deal-light', dealSuspectMax: 'fine-deal-suspect', dealStrongMax: 'fine-deal-strong',
+  listedPersonalMax: 'fine-listed-personal', listedLightMax: 'fine-listed-light', listedSuspectMax: 'fine-listed-suspect',
+  personalWordWeight: 'fine-personal-word-weight', businessWordWeight: 'fine-business-word-weight', personalGoodsWeight: 'fine-personal-goods-weight',
+};
+
+function openSellerFineRulesSettings() {
+  closeSettingsMenu();
+  const rules = currentConfig.sellerFineRules || {};
+  Object.entries(SELLER_FINE_RULE_FIELDS).forEach(([key, id]) => { document.getElementById(id).value = rules[key] ?? ''; });
+  document.getElementById('seller-fine-rules-modal-overlay').classList.add('show');
+}
+
+function hideSellerFineRulesModal() {
+  document.getElementById('seller-fine-rules-modal-overlay').classList.remove('show');
+}
+
+async function saveSellerFineRules() {
+  const sellerFineRules = {};
+  for (const [key, id] of Object.entries(SELLER_FINE_RULE_FIELDS)) {
+    const value = Number(document.getElementById(id).value);
+    if (!Number.isFinite(value) || value < 0) return alert('请填写有效的非负数规则参数');
+    sellerFineRules[key] = value;
+  }
+  if (sellerFineRules.businessThreshold >= sellerFineRules.personalThreshold) return alert('疑似小B分数线必须低于疑似个人卖家分数线');
+  if (!(sellerFineRules.dealPersonalMax <= sellerFineRules.dealLightMax && sellerFineRules.dealLightMax <= sellerFineRules.dealSuspectMax && sellerFineRules.dealSuspectMax <= sellerFineRules.dealStrongMax)) return alert('成交量分段必须从小到大填写');
+  if (!(sellerFineRules.listedPersonalMax <= sellerFineRules.listedLightMax && sellerFineRules.listedLightMax <= sellerFineRules.listedSuspectMax)) return alert('在售量分段必须从小到大填写');
+  try {
+    const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sellerFineRules }) });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || '保存失败');
+    currentConfig = mergeSellerManualLabels(data.config || currentConfig);
+    hideSellerFineRulesModal();
+  } catch (err) { alert('细筛规则保存失败：' + err.message); }
+}
+
+async function openMerchantPool() {
+  merchantPoolPage = 1;
+  merchantPoolSearch = '';
+  merchantPoolFilter = 'all';
+  document.getElementById('merchant-pool-search').value = '';
+  // 即使浏览器错过 WebSocket 事件，也以服务端的卖家池为准，避免显示旧缓存。
+  try {
+    const res = await fetch('/api/config');
+    if (res.ok) currentConfig = mergeSellerManualLabels(await res.json());
+  } catch { /* 保留当前缓存，页面仍可正常打开 */ }
+  renderMerchantPool();
+  document.getElementById('merchant-pool-modal-overlay').classList.add('show');
+}
+
+function hideMerchantPool() {
+  document.getElementById('merchant-pool-modal-overlay').classList.remove('show');
+}
+
+function merchantProfiles() {
+  const profiles = currentConfig.sellerProfiles || {};
+  const byIdentity = new Map();
+  for (const [key, profile] of Object.entries(profiles)) {
+    const fingerprint = profile.sellerFingerprint || (key.startsWith('avatar:') ? key.slice(7) : '');
+    const identity = profile.sellerId ? `id:${profile.sellerId}` : `avatar:${fingerprint || key}`;
+    const merged = { ...profile, sellerFingerprint: fingerprint };
+    const existing = byIdentity.get(identity);
+    if (!existing || Number(merged.checkedAt || 0) > Number(existing.checkedAt || 0)) byIdentity.set(identity, merged);
+  }
+  return [...byIdentity.values()];
+}
+
+function setMerchantPoolFilter(filter) {
+  merchantPoolFilter = filter;
+  merchantPoolPage = 1;
+  renderMerchantPool();
+}
+
+function setMerchantPoolSearch(value) {
+  merchantPoolSearch = String(value || '').trim();
+  merchantPoolPage = 1;
+  renderMerchantPool();
+}
+
+function clearMerchantPoolSearch() {
+  merchantPoolSearch = '';
+  const input = document.getElementById('merchant-pool-search');
+  if (input) input.value = '';
+  merchantPoolPage = 1;
+  renderMerchantPool();
+}
+
+function setMerchantPoolPage(page) {
+  merchantPoolPage = Math.max(1, Number(page) || 1);
+  renderMerchantPool();
+}
+
+function editMerchantProfile(index) {
+  const profile = merchantPoolVisibleRows[Number(index)];
+  if (profile) showSellerLabelModal(profile);
+}
+
+async function refreshMerchantProfile(index) {
+  const profile = merchantPoolVisibleRows[Number(index)];
+  if (!profile) return;
+  try {
+    const res = await fetch('/api/sellers/refresh', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sellerId: profile.sellerId || '', sellerFingerprint: profile.sellerFingerprint || '', sellerName: profile.sellerName || '' }),
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || '核验失败');
+    currentConfig = mergeSellerManualLabels(data.config || currentConfig);
+    renderMerchantPool();
+  } catch (err) { alert('重新核验失败：' + err.message); }
+}
+
+function renderMerchantPool() {
+  const query = merchantPoolSearch.toLowerCase();
+  const allProfiles = merchantProfiles();
+  const levelCounts = Object.fromEntries(['小B', '个人卖家', '疑似小B', '疑似个人卖家', '不明确'].map(level => [level, allProfiles.filter(profile => getSellerLevel(profile) === level).length]));
+  const rows = allProfiles.filter(profile => {
+    const level = getSellerLevel(profile);
+    if (merchantPoolFilter !== 'all' && level !== merchantPoolFilter) return false;
+    const source = [profile.sellerName, profile.sellerId, profile.sellerFingerprint, profile.sellerProfileReason, profile.latestProductTitle, ...(profile.sellerBusinessSignals || []), ...(profile.sellerPersonalSignals || [])].join(' ').toLowerCase();
+    return !query || source.includes(query);
+  }).sort((a, b) => Number(b.checkedAt || 0) - Number(a.checkedAt || 0));
+  const pageSize = 15;
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  merchantPoolPage = Math.min(merchantPoolPage, totalPages);
+  const pageRows = rows.slice((merchantPoolPage - 1) * pageSize, merchantPoolPage * pageSize);
+  merchantPoolVisibleRows = pageRows;
+  const summary = document.getElementById('merchant-pool-summary');
+  if (summary) summary.textContent = `共 ${allProfiles.length} 个卖家 · 小B ${levelCounts['小B']} · 个人 ${levelCounts['个人卖家']} · 疑似小B ${levelCounts['疑似小B']} · 不明确 ${levelCounts['不明确']}${query ? ` · 搜索结果 ${rows.length}` : ''}`;
+  [['all', 'merchant-filter-all'], ['小B', 'merchant-filter-confirmed'], ['个人卖家', 'merchant-filter-personal'], ['疑似小B', 'merchant-filter-suspected'], ['疑似个人卖家', 'merchant-filter-suspected-personal'], ['不明确', 'merchant-filter-unknown']].forEach(([filter, id]) => {
+    document.getElementById(id)?.classList.toggle('active', merchantPoolFilter === filter);
+  });
+  const tbody = document.getElementById('merchant-pool-tbody');
+  tbody.innerHTML = pageRows.length ? pageRows.map((profile, index) => {
+    const level = getSellerLevel(profile);
+    const cls = sellerLevelClass(level);
+    const avatar = profile.sellerAvatarUrl ? `<img class="merchant-avatar" src="${escapeHtml(profile.sellerAvatarUrl)}" alt="">` : '<div class="merchant-avatar"></div>';
+    const identity = profile.sellerId || profile.sellerFingerprint || '未获取稳定身份';
+    return `<tr>
+      <td><div class="merchant-seller">${avatar}<div><div class="merchant-seller-name" title="${escapeHtml(profile.sellerName || '')}">${escapeHtml(profile.sellerName || '未命名卖家')}</div><div class="compact-meta merchant-seller-meta" title="${escapeHtml(identity)}">${escapeHtml([profile.sellerLocation, profile.sellerRating, identity].filter(Boolean).join(' · '))}</div></div></div></td>
+      <td><button class="seller-profile seller-profile-button ${cls}" title="点击修改卖家等级" onclick="editMerchantProfile(${index})">${escapeHtml(level)}</button></td>
+      <td class="merchant-data">成交：${escapeHtml(String(profile.sellerDealCount ?? '—'))}<br>在售：${escapeHtml(String(profile.sellerListedCount ?? '—'))}</td>
+      <td class="merchant-evidence" title="${escapeHtml(profile.sellerProfileReason || '人工标记')}">${escapeHtml(profile.sellerProfileReason || '人工标记')}</td>
+      <td>${profile.latestProductHref ? `<a class="merchant-product-link" href="${escapeHtml(profile.latestProductHref)}" target="_blank" rel="noreferrer" title="${escapeHtml(profile.latestProductTitle || '')}">${escapeHtml(profile.latestProductTitle || '查看商品')}</a>` : `<span class="merchant-product-link">${escapeHtml(profile.latestProductTitle || '—')}</span>`}</td>
+      <td>${escapeHtml(formatTimeAgo(profile.checkedAt))}</td>
+      <td><div class="merchant-actions">${profile.sellerProfileUrl ? `<a class="btn btn-sm" href="${escapeHtml(profile.sellerProfileUrl)}" target="_blank" rel="noreferrer" title="打开卖家在售页，人工核对判断证据">店铺</a>` : ''}<button class="btn btn-sm" title="打开最近商品详情并更新卖家档案" onclick="refreshMerchantProfile(${index})">核验</button></div></td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="7" class="empty-cell">暂无商家档案</td></tr>';
+  const pagination = document.getElementById('merchant-pool-pagination');
+  if (pagination) {
+    pagination.innerHTML = rows.length > pageSize ? `<button class="btn btn-sm" onclick="setMerchantPoolPage(${merchantPoolPage - 1})" ${merchantPoolPage <= 1 ? 'disabled' : ''}>上一页</button><span>第 ${merchantPoolPage} / ${totalPages} 页 · ${rows.length} 条</span><button class="btn btn-sm" onclick="setMerchantPoolPage(${merchantPoolPage + 1})" ${merchantPoolPage >= totalPages ? 'disabled' : ''}>下一页</button>` : (rows.length ? `<span>${rows.length} 条档案</span>` : '');
+  }
+}
+
+function parseWordList(value) {
+  return [...new Set(String(value || '').split(/[\n,，、]/).map(word => word.trim()).filter(Boolean))];
+}
+
+async function saveSellerLexicon() {
+  const sellerLexicon = {
+    businessWords: parseWordList(document.getElementById('seller-business-words').value),
+    luxuryProductWords: parseWordList(document.getElementById('seller-luxury-product-words').value),
+  };
+  try {
+    const res = await fetch('/api/config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sellerLexicon }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '卖家标注保存失败');
+    if (!data.ok) throw new Error(data.error || '保存失败');
+    currentConfig = mergeSellerManualLabels(data.config || currentConfig);
+    hideSellerLexiconModal();
+  } catch (err) {
+    alert('词库保存失败：' + err.message);
+  }
+}
+
 function hideBlacklistModal() {
   document.getElementById('blacklist-modal-overlay').classList.remove('show');
 }
@@ -238,66 +439,136 @@ function loadLocalSellerManualLabels() {
   }
 }
 
-function saveLocalSellerManualLabels(labels) {
-  try {
-    localStorage.setItem(SELLER_LABELS_STORAGE_KEY, JSON.stringify(labels || {}));
-  } catch { /* ignore */ }
+function saveLocalSellerManualLabels() {
+  // 卖家等级以服务端配置为唯一来源。清除旧版离线缓存，避免已删除的标记重现。
+  try { localStorage.removeItem(SELLER_LABELS_STORAGE_KEY); } catch { /* ignore */ }
 }
 
 function mergeSellerManualLabels(config = {}) {
-  const localLabels = loadLocalSellerManualLabels();
-  return {
-    ...config,
-    sellerManualLabels: {
-      ...(config.sellerManualLabels || {}),
-      ...localLabels,
-    },
-  };
+  saveLocalSellerManualLabels();
+  return { ...config, sellerManualLabels: { ...(config.sellerManualLabels || {}) } };
 }
 
-function getSellerManualLabel(name) {
+function sellerIdentityKeys(productOrName) {
+  const product = typeof productOrName === 'object' && productOrName ? productOrName : { sellerName: productOrName };
+  const keys = [];
+  if (product.sellerId) keys.push(`id:${String(product.sellerId).trim()}`);
+  if (product.sellerFingerprint) keys.push(`avatar:${String(product.sellerFingerprint).trim()}`);
+  // 地区不是卖家身份，绝不能用作标记键或指纹兼容项。
+  const name = String(product.sellerName || '').trim();
+  if (name) keys.push(normalizeSellerKey(name), name);
+  return keys.filter(Boolean);
+}
+
+function getSellerManualLabel(productOrName) {
   const labels = currentConfig.sellerManualLabels || {};
-  const rawName = String(name || '').trim();
-  return labels[normalizeSellerKey(rawName)] || labels[rawName] || '';
+  const label = sellerIdentityKeys(productOrName).map(key => labels[key]).find(Boolean) || '';
+  if (label === '大卖') return '小B';
+  if (label === '重点个人卖家') return '个人卖家';
+  return label === '待判断' ? '不明确' : label;
 }
 
-function showSellerLabelModal(sellerName) {
-  labelingSellerName = String(sellerName || '').trim();
-  if (!labelingSellerName) return;
-  const current = getSellerManualLabel(labelingSellerName);
+function getSellerLevel(product) {
+  const manual = getSellerManualLabel(product) || product?.sellerManualLabel || '';
+  const automatic = product?.sellerType === '待判断' ? '不明确' : product?.sellerType;
+  return manual || automatic || '不明确';
+}
+
+function sellerLevelClass(level) {
+  if (level === '小B') return 'seller-business-strong';
+  if (level === '疑似小B') return 'seller-business';
+  if (level === '个人卖家') return 'seller-personal-strong';
+  if (level === '疑似个人卖家') return 'seller-personal';
+  return 'seller-unknown';
+}
+
+function markFineSeller(productId) {
+  const task = tasks.find(item => item.id === activeTaskId);
+  const product = (task?.products?.fineFiltered || []).find(item => String(item.id) === String(productId));
+  if (!product) {
+    alert('未找到对应的细筛商品，请刷新页面后重试。');
+    return;
+  }
+  if (!product.sellerName && !product.sellerId && !product.sellerFingerprint) {
+    alert('该历史细筛结果没有卖家身份信息，无法安全标记。请重新细筛该商品后再标记。');
+    return;
+  }
+  labelingSeller = product;
+  const sellerName = String(product.sellerName || product.sellerId || '该卖家');
+  const current = getSellerManualLabel(product);
   document.getElementById('seller-label-desc').textContent = current
-    ? `${labelingSellerName} 当前人工标注：${current}`
-    : `${labelingSellerName} 尚未人工标注`;
+    ? `${sellerName} 当前人工标注：${current}`
+    : `${sellerName} 尚未人工标注`;
+  document.getElementById('seller-label-modal-overlay').classList.add('show');
+}
+
+async function quickLabelSeller(select) {
+  const label = select.value;
+  if (!label) return;
+  try {
+    labelingSeller = JSON.parse(select.dataset.seller || '{}');
+  } catch {
+    labelingSeller = null;
+  }
+  if (!labelingSeller?.sellerName && !labelingSeller?.sellerId && !labelingSeller?.sellerFingerprint) {
+    alert('未取得可靠卖家身份，无法标记。');
+    select.value = '';
+    return;
+  }
+  await saveSellerManualLabel(label === '__clear__' ? '' : label);
+}
+
+function showSellerLabelModal(product) {
+  labelingSeller = product || null;
+  const sellerName = String(labelingSeller?.sellerName || '').trim();
+  if (!sellerName && !labelingSeller?.sellerFingerprint && !labelingSeller?.sellerId) return;
+  const current = getSellerManualLabel(labelingSeller);
+  document.getElementById('seller-label-desc').textContent = current
+    ? `${sellerName || '该卖家'} 当前人工标注：${current}`
+    : `${sellerName || '该卖家'} 尚未人工标注`;
   document.getElementById('seller-label-modal-overlay').classList.add('show');
 }
 
 function hideSellerLabelModal() {
   document.getElementById('seller-label-modal-overlay').classList.remove('show');
-  labelingSellerName = '';
+  labelingSeller = null;
 }
 
 async function saveSellerManualLabel(label) {
-  if (!labelingSellerName) return;
+  if (!labelingSeller) return;
   const labels = { ...(currentConfig.sellerManualLabels || {}) };
-  const key = normalizeSellerKey(labelingSellerName);
-  if (label) labels[key] = label;
-  else delete labels[key];
+  const keys = sellerIdentityKeys(labelingSeller);
+  if (label) keys.forEach(key => { labels[key] = label; });
+  else keys.forEach(key => { delete labels[key]; });
   currentConfig = { ...currentConfig, sellerManualLabels: labels };
   saveLocalSellerManualLabels(labels);
 
   try {
-    const res = await fetch('/api/config', {
+    const seller = {
+      sellerId: labelingSeller.sellerId || '',
+      sellerFingerprint: labelingSeller.sellerFingerprint || '',
+      sellerName: labelingSeller.sellerName || '',
+      sellerAvatarUrl: labelingSeller.sellerAvatarUrl || '',
+      sellerLocation: labelingSeller.sellerLocation || '',
+      sellerRating: labelingSeller.sellerRating || '',
+      sellerDealCount: labelingSeller.sellerDealCount ?? null,
+      sellerListedCount: labelingSeller.sellerListedCount ?? null,
+    };
+    const res = await fetch('/api/sellers/label', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sellerManualLabels: labels }),
+      body: JSON.stringify({ seller, label }),
     });
     const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '卖家标注保存失败');
     if (data.config) currentConfig = mergeSellerManualLabels(data.config);
     hideSellerLabelModal();
     renderProducts();
+    renderMerchantPool();
   } catch (err) {
     hideSellerLabelModal();
     renderProducts();
+    renderMerchantPool();
     alert('卖家标注已在当前浏览器保存；后端保存失败，重启服务后会恢复完整保存: ' + err.message);
   }
 }
@@ -523,7 +794,7 @@ async function apiPut(url, body) {
   return data;
 }
 
-async function createTask() {
+async function createTask(startImmediately = true) {
   const body = readTaskForm();
   if (!body) return;
 
@@ -544,7 +815,7 @@ async function createTask() {
       return;
     }
 
-    await apiPost('/api/tasks', body);
+    await apiPost('/api/tasks', { ...body, startImmediately });
 
     hideCreateModal();
     clearForm();
@@ -554,12 +825,12 @@ async function createTask() {
 function readTaskForm() {
   const name = document.getElementById('f-name').value.trim();
   const group = document.getElementById('f-group').value.trim();
-  const queriesRaw = document.getElementById('f-queries').value.trim();
+  const keywordGroups = [1, 2, 3, 4].map(i => document.getElementById(`f-query-group-${i}`).value.trim()).filter(Boolean).map(value => value.split(/[,，\s]+/).map(s => s.trim()).filter(Boolean));
   const priceMin = document.getElementById('f-price-min').value;
   const priceMax = document.getElementById('f-price-max').value;
   const wantMax = document.getElementById('f-want-max').value;
   const maxPages = document.getElementById('f-pages').value;
-  const queries = queriesRaw.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+  const queries = keywordGroups.flat();
   const wantMaxNumber = wantMax === '' ? null : Number(wantMax);
 
   if (wantMaxNumber !== null && (!Number.isFinite(wantMaxNumber) || wantMaxNumber < 0)) {
@@ -571,20 +842,36 @@ function readTaskForm() {
     name: name || queries[0],
     group: group || (activeTaskGroup !== '全部' ? activeTaskGroup : '未分组'),
     queries,
+    keywordGroups,
     priceMin: priceMin ? Number(priceMin) : null,
     priceMax: priceMax ? Number(priceMax) : null,
-    maxPages: maxPages ? Number(maxPages) : 3,
+    maxPages: maxPages ? Number(maxPages) : 1,
     region: document.getElementById('f-region').value.trim(),
     personalSeller: document.getElementById('f-personal').checked,
     requireFreeShipping: document.getElementById('f-free-shipping').checked,
     wantMax: wantMaxNumber > 0 ? wantMaxNumber : null,
     titleExclude: document.getElementById('f-title-exclude').value.trim(),
-    enableCoarseSemantic: document.getElementById('f-coarse-semantic').checked,
-    customRequirements: document.getElementById('f-requirements').value.trim(),
+    searchSort: document.getElementById('f-search-sort').value,
+    requireInspect: document.getElementById('f-inspect').checked,
+    requireGuarantee: document.getElementById('f-guarantee').checked,
+    requireSuperShop: document.getElementById('f-super-shop').checked,
+    requireBrandNew: document.getElementById('f-brand-new').checked,
+    requireStrictSelect: document.getElementById('f-strict-select').checked,
+    requireResale: document.getElementById('f-resale').checked,
+    sellerStructureRules: {
+      sampleSize: Number(document.getElementById('f-luxury-sample-size').value) || 20,
+      luxuryCountThreshold: Number(document.getElementById('f-luxury-count-threshold').value) || 5,
+      luxuryRatioThreshold: (Number(document.getElementById('f-luxury-ratio-threshold').value) || 40) / 100,
+      luxuryHighRatioThreshold: (Number(document.getElementById('f-luxury-high-ratio-threshold').value) || 60) / 100,
+    },
+    runStages: {
+      collect: document.getElementById('f-stage-collect').checked,
+      coarse: document.getElementById('f-stage-coarse').checked,
+      fine: document.getElementById('f-stage-fine').checked,
+      inquiry: document.getElementById('f-stage-inquiry').checked,
+    },
     chatStrategy: document.getElementById('f-chat-strategy').value.trim(),
     persona: document.getElementById('f-persona').value.trim() || '',
-    coarsePrompt: document.getElementById('f-coarse-prompt').value.trim() || '',
-    finePrompt: document.getElementById('f-fine-prompt').value.trim() || '',
   };
 }
 
@@ -662,22 +949,35 @@ function editTask(id) {
 function fillTaskForm(task, nameOverride) {
   const c = task.config;
   document.getElementById('f-name').value = nameOverride ?? (task.name || '');
+  populateTaskGroupSelect(getTaskGroup(task));
   document.getElementById('f-group').value = getTaskGroup(task) || (activeTaskGroup !== '全部' ? activeTaskGroup : '未分组');
-  document.getElementById('f-queries').value = (c.queries || []).join(', ');
+  const groups = c.keywordGroups || [(c.queries || [])];
+  [1, 2, 3, 4].forEach((i, index) => { document.getElementById(`f-query-group-${i}`).value = (groups[index] || []).join(' '); });
   document.getElementById('f-price-min').value = c.priceMin ?? '';
   document.getElementById('f-price-max').value = c.priceMax ?? '';
-  document.getElementById('f-pages').value = c.maxPages || 3;
+  document.getElementById('f-pages').value = c.maxPages || 1;
   document.getElementById('f-region').value = c.region || '';
   document.getElementById('f-personal').checked = !!c.personalSeller;
   document.getElementById('f-free-shipping').checked = !!c.requireFreeShipping;
   document.getElementById('f-want-max').value = c.wantMax ?? '';
   document.getElementById('f-title-exclude').value = c.titleExclude || '';
-  document.getElementById('f-coarse-semantic').checked = !!c.enableCoarseSemantic;
-  document.getElementById('f-requirements').value = c.customRequirements || '';
+  document.getElementById('f-search-sort').value = c.searchSort || 'newest';
+  document.getElementById('f-inspect').checked = !!c.requireInspect;
+  document.getElementById('f-guarantee').checked = !!c.requireGuarantee;
+  document.getElementById('f-super-shop').checked = !!c.requireSuperShop;
+  document.getElementById('f-brand-new').checked = !!c.requireBrandNew;
+  document.getElementById('f-strict-select').checked = !!c.requireStrictSelect;
+  document.getElementById('f-resale').checked = !!c.requireResale;
+  document.getElementById('f-luxury-sample-size').value = c.sellerStructureRules?.sampleSize ?? 20;
+  document.getElementById('f-luxury-count-threshold').value = c.sellerStructureRules?.luxuryCountThreshold ?? 5;
+  document.getElementById('f-luxury-ratio-threshold').value = Math.round((c.sellerStructureRules?.luxuryRatioThreshold ?? 0.4) * 100);
+  document.getElementById('f-luxury-high-ratio-threshold').value = Math.round((c.sellerStructureRules?.luxuryHighRatioThreshold ?? 0.6) * 100);
+  document.getElementById('f-stage-collect').checked = c.runStages?.collect !== false;
+  document.getElementById('f-stage-coarse').checked = c.runStages?.coarse !== false;
+  document.getElementById('f-stage-fine').checked = c.runStages?.fine !== false;
+  document.getElementById('f-stage-inquiry').checked = !!c.runStages?.inquiry;
   document.getElementById('f-chat-strategy').value = c.chatStrategy || '';
   document.getElementById('f-persona').value = c.persona || defaultPersona;
-  document.getElementById('f-coarse-prompt').value = c.coarsePrompt || defaultCoarsePrompt;
-  document.getElementById('f-fine-prompt').value = c.finePrompt || defaultFinePrompt;
 }
 
 async function deleteTask(id) {
@@ -850,7 +1150,7 @@ function renderProductStats() {
       <div class="stat-value" style="color:var(--orange)">${task.products.coarseCount || 0}</div><div class="stat-label">粗筛通过</div>
     </button>
     <button class="stat-card stat-filter ${productFilter === 'fine' ? 'active' : ''}" onclick="setProductFilter('fine')">
-      <div class="stat-value" style="color:var(--green)">${task.products.fineCount || 0}</div><div class="stat-label">细筛通过</div>
+      <div class="stat-value" style="color:var(--green)">${task.products.fineCount || 0}</div><div class="stat-label">细筛可跟进（已核验 ${task.products.fineReviewedCount ?? task.products.fineFiltered?.length ?? 0}）</div>
     </button>
     <button class="stat-card stat-filter ${productFilter === 'chat' ? 'active' : ''}" onclick="setProductFilter('chat')">
       <div class="stat-value" style="color:var(--accent)">${task.chatSessions?.length || 0}</div><div class="stat-label">聊天会话</div>
@@ -983,22 +1283,31 @@ function renderProducts() {
       <td>${p.image ? `<img class="product-img" src="${escapeHtml(p.image)}" loading="lazy" onclick="showImagePreview('${escapeHtml(p.image)}')">` : '-'}</td>
       <td class="product-title" title="${escapeHtml(p.title)}">${renderProductTitle(p)}</td>
       <td class="product-price">${escapeHtml(p.price || '')}</td>
-      <td>${renderPriceChange(p)}</td>
-      <td>${renderProductHeat(p)}</td>
+      <td class="list-flags-col">${renderListFlags(p)}</td>
       <td>${renderProductFreshness(p)}</td>
-      <td>${renderSellerCell(p)}</td>
+      <td>${renderSellerCell(p, false)}</td>
       <td>
         <div class="product-actions">
           ${chatIds.has(p.id)
             ? `<button class="badge badge-button ${badgeCls}" onclick="showProductChatModal('${escapeHtml(p.id)}')">${badge}</button>`
             : `<span class="badge ${badgeCls}">${badge}</span>`}
           <button class="track-btn ${tracked ? 'tracked' : ''}" data-url="${escapeHtml(p.href || '')}" data-title="${escapeHtml(p.title || '')}" onclick="addProductToTrackerFromList(this.dataset.url, this.dataset.title)" ${p.href && !tracked ? '' : 'disabled'}>${tracked ? '已跟踪' : '跟踪'}</button>
+          ${fineIds.has(p.id) ? renderQuickSellerLabel(p) : ''}
         </div>
       </td>
     </tr>`;
   }).join('');
 
   renderProductPagination(all.length, totalPages, pageStart, pageItems.length);
+}
+
+function renderListFlags(product) {
+  const badges = Array.isArray(product.badges) ? product.badges : [];
+  const labels = ['个人闲置', '验货宝', '验号担保', '包邮', '超赞鱼小铺', '全新', '严选', '转卖'];
+  const hits = labels.filter(label => badges.includes(label) || (label === '个人闲置' && product.personalSeller === true));
+  return hits.length
+    ? `<div class="list-flags">${hits.map(label => `<span class="list-flag list-flag-yes">${escapeHtml(label)}</span>`).join('')}</div>`
+    : '<span class="list-flag">—</span>';
 }
 
 function getProductTrackId(productOrUrl) {
@@ -1075,17 +1384,21 @@ function renderPriceChange(product) {
   return '<span class="price-change muted">未变</span>';
 }
 
-function renderSellerProfile(product) {
-  const manualLabel = getSellerManualLabel(product.sellerName) || product.sellerManualLabel || '';
-  const type = manualLabel || product.sellerType || '待判断';
+function renderSellerProfile(product, canLabel = false) {
+  const manualLabel = getSellerManualLabel(product) || product.sellerManualLabel || '';
+  const type = getSellerLevel(product);
   const score = manualLabel ? null : (Number.isFinite(Number(product.sellerPersonalScore)) ? Number(product.sellerPersonalScore) : null);
   const reason = manualLabel ? `人工标注：${manualLabel}` : (product.sellerProfileReason || '细筛后生成');
-  const cls = type === '个人倾向'
-    ? 'seller-personal'
-    : (type === '大卖' ? 'seller-business-strong' : (type === '小B' || type === '明显小B' ? 'seller-business-strong' : (type === '疑似小B' ? 'seller-business' : 'seller-unknown')));
-  const label = score == null ? type : `${type} ${score}`;
-  const sellerName = product.sellerName || '';
-  return `<button class="seller-profile seller-profile-button ${cls}" data-seller="${escapeHtml(sellerName)}" title="${escapeHtml(reason)}" onclick="showSellerLabelModal(this.dataset.seller)">${escapeHtml(label)}</button>`;
+  const cls = sellerLevelClass(type);
+  const label = type === '疑似小B' ? '⚠ 疑似小B' : (type === '小B' && !manualLabel && product.sellerAutoConfirmed ? '⚠ 小B（经营词）' : (score == null ? type : `${type} ${score}`));
+  if (!canLabel) return `<span class="seller-profile ${cls}" title="${escapeHtml(reason)}">${escapeHtml(label)}</span>`;
+  const payload = escapeHtml(JSON.stringify({ sellerName: product.sellerName || '', sellerId: product.sellerId || '', sellerFingerprint: product.sellerFingerprint || '' }));
+  return `<button class="seller-profile seller-profile-button ${cls}" data-seller="${payload}" title="${escapeHtml(reason)}" onclick="showSellerLabelModal(JSON.parse(this.dataset.seller))">${escapeHtml(label)}</button>`;
+}
+
+function renderQuickSellerLabel(product) {
+  const payload = escapeHtml(JSON.stringify({ sellerName: product.sellerName || '', sellerId: product.sellerId || '', sellerFingerprint: product.sellerFingerprint || '', sellerAvatarUrl: product.sellerAvatarUrl || '', sellerLocation: product.sellerLocation || '', sellerRating: product.sellerRating || '', sellerDealCount: product.sellerDealCount ?? null, sellerListedCount: product.sellerListedCount ?? null }));
+  return `<select class="quick-seller-label" data-seller="${payload}" onchange="quickLabelSeller(this)" title="直接标记卖家等级"><option value="">标记卖家…</option><option value="小B">小B</option><option value="个人卖家">个人卖家</option><option value="疑似小B">疑似小B</option><option value="疑似个人卖家">疑似个人卖家</option><option value="不明确">不明确</option><option value="__clear__">清除标记</option></select>`;
 }
 
 function renderProductHeat(product) {
@@ -1098,18 +1411,20 @@ function renderProductHeat(product) {
 }
 
 function renderProductFreshness(product) {
+  const sellerTime = formatSellerLastSeen(product.sellerLastSeen || product.updatedAt);
+  const discoveredTime = formatTimeAgo(product.firstSeenAt);
   return `
     <div class="compact-stack">
-      <div>${escapeHtml(formatSellerLastSeen(product.sellerLastSeen || product.updatedAt))}</div>
-      <div class="compact-meta">发现 ${escapeHtml(formatTimeAgo(product.firstSeenAt))}</div>
+      ${sellerTime ? `<div>${escapeHtml(sellerTime)}</div>` : ''}
+      ${discoveredTime ? `<div class="compact-meta">${escapeHtml(discoveredTime)}</div>` : ''}
     </div>
   `;
 }
 
-function renderSellerCell(product) {
+function renderSellerCell(product, canLabel = false) {
   return `
     <div class="seller-cell">
-      <div>${renderSellerProfile(product)}</div>
+      <div>${renderSellerProfile(product, canLabel)}</div>
       <div class="seller-line" title="${escapeHtml(product.sellerName || '')}">${escapeHtml(product.sellerName || '-')}</div>
       <div class="compact-meta">${escapeHtml(product.sellerLocation || '')}</div>
     </div>
@@ -1127,7 +1442,7 @@ function formatCount(value, fallback = '') {
 }
 
 function formatSellerLastSeen(value) {
-  return String(value || '').replace(/\s+/g, ' ').trim() || '-';
+  return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
 function formatTimeAgo(value) {
@@ -1180,7 +1495,19 @@ function setProductSort(key) {
 }
 
 function sortProducts(products, chatIds, fineIds, coarseIds) {
-  if (!productSort.key) return products;
+  const sellerLevelRank = (p) => ({
+    '小B': 0,
+    '疑似小B': 1,
+    '不明确': 2,
+    '疑似个人卖家': 3,
+    '个人卖家': 4,
+  })[getSellerLevel(p)] ?? 5;
+
+  // 细筛默认按排除优先级排列，方便先核查已确认和疑似的小B。
+  if (!productSort.key) {
+    if (productFilter !== 'fine') return products;
+    return [...products].sort((a, b) => sellerLevelRank(a) - sellerLevelRank(b));
+  }
 
   const dir = productSort.dir === 'desc' ? -1 : 1;
   const numberValue = (value) => {
@@ -1223,10 +1550,7 @@ function sortProducts(products, chatIds, fineIds, coarseIds) {
     if (productSort.key === 'view') return numberValue(p.viewCount);
     if (productSort.key === 'updated') return lastSeenValue(p.sellerLastSeen || p.updatedAt);
     if (productSort.key === 'sellerScore') {
-      const manual = getSellerManualLabel(p.sellerName) || p.sellerManualLabel || '';
-      if (manual === '大卖') return 100;
-      if (manual === '小B') return 75;
-      return Number.isFinite(Number(p.sellerPersonalScore)) ? -Number(p.sellerPersonalScore) : Number.POSITIVE_INFINITY;
+      return sellerLevelRank(p);
     }
     if (productSort.key === 'firstSeen') return Number.isFinite(Number(p.firstSeenAt)) ? -Number(p.firstSeenAt) : Number.POSITIVE_INFINITY;
     if (productSort.key === 'priceChange') {
@@ -1258,7 +1582,7 @@ function renderSortHeaders() {
   ['price', 'priceChange', 'want', 'view', 'updated', 'sellerScore', 'firstSeen', 'seller', 'location', 'stage'].forEach(key => {
     const el = document.getElementById(`sort-${key}`);
     if (!el) return;
-    const label = { price: '价格', priceChange: '变化', want: '热度', view: '浏览', updated: '时效', sellerScore: '卖家', firstSeen: '发现', seller: '卖家', location: '地区', stage: '阶段' }[key];
+    const label = { price: '价格', priceChange: '变化', want: '热度', view: '浏览', updated: '时效', sellerScore: '卖家等级', firstSeen: '发现', seller: '卖家', location: '地区', stage: '阶段' }[key];
     const arrow = productSort.key === key ? (productSort.dir === 'asc' ? ' ↑' : ' ↓') : ' ↕';
     el.textContent = label + arrow;
     el.title = '点击排序';
@@ -1477,10 +1801,11 @@ function findSellerProfileSource(sellerName) {
 }
 
 function renderTrackerSeller(item) {
-  const manualLabel = getSellerManualLabel(item.sellerName) || item.sellerManualLabel || '';
-  const cls = manualLabel === '大卖' || manualLabel === '小B' ? 'seller-business-strong' : 'seller-unknown';
+  const manualLabel = getSellerManualLabel(item) || item.sellerManualLabel || '';
+  const cls = sellerLevelClass(manualLabel);
+  const payload = escapeHtml(JSON.stringify({ sellerName: item.sellerName || '', sellerId: item.sellerId || '', sellerFingerprint: item.sellerFingerprint || '' }));
   const profile = manualLabel
-    ? `<button class="seller-profile seller-profile-button ${cls}" data-seller="${escapeHtml(item.sellerName || '')}" title="人工标注：${escapeHtml(manualLabel)}" onclick="showSellerLabelModal(this.dataset.seller)">${escapeHtml(manualLabel)}</button>`
+    ? `<button class="seller-profile seller-profile-button ${cls}" data-seller="${payload}" title="人工标注：${escapeHtml(manualLabel)}" onclick="showSellerLabelModal(JSON.parse(this.dataset.seller))">${escapeHtml(manualLabel)}</button>`
     : '';
   return `
     <div class="tracker-seller-line">
@@ -1913,10 +2238,13 @@ function openNewTaskModal() {
 
 function showCreateModal() {
   const isEditing = !!editingTaskId;
+  populateTaskGroupSelect(document.getElementById('f-group').value || (activeTaskGroup !== '全部' ? activeTaskGroup : '未分组'));
   const title = document.getElementById('task-modal-title');
   const submit = document.getElementById('task-modal-submit');
+  const createOnly = document.getElementById('task-modal-create-only');
   if (title) title.textContent = isEditing ? '编辑任务' : '新建采购任务';
   if (submit) submit.textContent = isEditing ? '保存修改' : '创建并启动';
+  if (createOnly) createOnly.hidden = isEditing;
   document.getElementById('modal-overlay').classList.add('show');
 }
 
@@ -1926,29 +2254,31 @@ function hideCreateModal() {
 }
 
 function clearForm() {
-  ['f-name', 'f-group', 'f-queries', 'f-price-min', 'f-price-max', 'f-region', 'f-want-max', 'f-title-exclude', 'f-requirements', 'f-chat-strategy'].forEach(id => {
+  ['f-name', 'f-price-max', 'f-region', 'f-want-max', 'f-chat-strategy', 'f-query-group-1', 'f-query-group-2', 'f-query-group-3', 'f-query-group-4'].forEach(id => {
     document.getElementById(id).value = '';
   });
+  populateTaskGroupSelect(activeTaskGroup !== '全部' ? activeTaskGroup : '未分组');
   document.getElementById('f-group').value = activeTaskGroup !== '全部' ? activeTaskGroup : '未分组';
-  document.getElementById('f-pages').value = '3';
+  document.getElementById('f-pages').value = '1';
+  document.getElementById('f-price-min').value = '500';
+  document.getElementById('f-title-exclude').value = '求购、维修、养护、配件';
   document.getElementById('f-personal').checked = false;
   document.getElementById('f-free-shipping').checked = false;
-  document.getElementById('f-coarse-semantic').checked = false;
+  ['f-inspect', 'f-guarantee', 'f-super-shop', 'f-brand-new', 'f-strict-select', 'f-resale'].forEach(id => { document.getElementById(id).checked = false; });
+  document.getElementById('f-search-sort').value = 'newest';
+  document.getElementById('f-luxury-sample-size').value = '20';
+  document.getElementById('f-luxury-count-threshold').value = '5';
+  document.getElementById('f-luxury-ratio-threshold').value = '40';
+  document.getElementById('f-luxury-high-ratio-threshold').value = '60';
   document.getElementById('f-persona').value = defaultPersona;
-  document.getElementById('f-coarse-prompt').value = defaultCoarsePrompt;
-  document.getElementById('f-fine-prompt').value = defaultFinePrompt;
+  document.getElementById('f-stage-collect').checked = true;
+  document.getElementById('f-stage-coarse').checked = true;
+  document.getElementById('f-stage-fine').checked = true;
+  document.getElementById('f-stage-inquiry').checked = false;
 }
 
 function resetPersona() {
   document.getElementById('f-persona').value = defaultPersona;
-}
-
-function resetCoarsePrompt() {
-  document.getElementById('f-coarse-prompt').value = defaultCoarsePrompt;
-}
-
-function resetFinePrompt() {
-  document.getElementById('f-fine-prompt').value = defaultFinePrompt;
 }
 
 async function loadDefaults() {
@@ -1956,11 +2286,7 @@ async function loadDefaults() {
     const res = await fetch('/api/defaults');
     const data = await res.json();
     defaultPersona = data.persona || '';
-    defaultCoarsePrompt = data.coarsePrompt || '';
-    defaultFinePrompt = data.finePrompt || '';
     document.getElementById('f-persona').value = defaultPersona;
-    document.getElementById('f-coarse-prompt').value = defaultCoarsePrompt;
-    document.getElementById('f-fine-prompt').value = defaultFinePrompt;
   } catch { /* ignore */ }
 }
 
@@ -1974,6 +2300,31 @@ function getTaskGroup(task) {
   if (task?.group) return task.group;
   if ((task?.name || '').includes('宝可梦')) return '宝可梦';
   return '未分组';
+}
+
+function populateTaskGroupSelect(selectedGroup = '未分组') {
+  const select = document.getElementById('f-group');
+  if (!select) return;
+  const groups = [...new Set(tasks.map(getTaskGroup).filter(Boolean))]
+    .filter(group => group !== '未分组')
+    .sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  const target = selectedGroup || '未分组';
+  if (target !== '未分组' && !groups.includes(target)) groups.push(target);
+  select.innerHTML = ['未分组', ...groups]
+    .map(group => `<option value="${escapeHtml(group)}">${escapeHtml(group)}</option>`)
+    .concat('<option value="__new_group__">＋ 新建分组…</option>')
+    .join('');
+  select.value = target;
+}
+
+function handleTaskGroupSelect(select) {
+  if (select.value !== '__new_group__') return;
+  const group = prompt('请输入新分组名称：', '');
+  if (!group?.trim()) {
+    select.value = '未分组';
+    return;
+  }
+  populateTaskGroupSelect(group.trim());
 }
 
 // ========== Model Switching ==========
