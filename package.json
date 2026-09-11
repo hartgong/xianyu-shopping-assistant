@@ -4,8 +4,9 @@
   "description": "闲鱼智能购物助手 - AI 驱动的二手商品自动搜索、筛选与询价工具",
   "type": "module",
   "scripts": {
-    "start": "node server.mjs",
+    "start": "node scripts/start.mjs",
     "dev": "node --watch server.mjs",
+    "stop": "node scripts/stop.mjs",
     "reset:test-data": "node scripts/reset-test-data.mjs"
   },
   "engines": {

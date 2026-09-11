@@ -1,4 +1,5 @@
 import express from 'express';
+import fs from 'fs';
 import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
 import path from 'path';
@@ -23,6 +24,8 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
+const runtimeDir = path.join(__dirname, '.runtime');
+const pidFile = path.join(runtimeDir, 'server.pid');
 
 const app = express();
 const server = createServer(app);
@@ -69,6 +72,7 @@ async function gracefulShutdown(signal) {
   for (const ws of clients) ws.close();
 
   await new Promise(resolve => server.close(resolve));
+  fs.rmSync(pidFile, { force: true });
   process.exit(0);
 }
 
@@ -341,6 +345,8 @@ app.post('/api/model', (req, res) => {
 });
 
 server.listen(PORT, () => {
+  fs.mkdirSync(runtimeDir, { recursive: true });
+  fs.writeFileSync(pidFile, String(process.pid));
   const configured = isConfigured();
   console.log(`🚀 闲鱼智能助手已启动: http://localhost:${PORT}`);
   if (!configured) {
