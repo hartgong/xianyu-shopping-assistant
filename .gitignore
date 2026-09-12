@@ -3,6 +3,7 @@ node_modules/
 
 # Runtime data
 browser-data/
+.runtime/
 data/config.json
 data/tasks.json
 

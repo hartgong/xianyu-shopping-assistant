@@ -36,7 +36,9 @@ const child = spawn(process.execPath, ['server.mjs'], {
 child.unref();
 fs.closeSync(logFd);
 
-for (let attempt = 0; attempt < 15; attempt += 1) {
+// 启用云端卖家池后，首次 TLS 连接和数据库建表可能需要数秒；
+// 等待服务真正写入 PID，避免后台进程仍在启动时被误报为失败。
+for (let attempt = 0; attempt < 150; attempt += 1) {
   await new Promise(resolve => setTimeout(resolve, 100));
   if (fs.existsSync(pidFile)) {
     console.log(`🚀 服务已在后台启动（PID ${child.pid}）：http://localhost:3000`);

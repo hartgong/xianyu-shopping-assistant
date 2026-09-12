@@ -1,3 +1,4 @@
+import './lib/env.mjs';
 import express from 'express';
 import fs from 'fs';
 import { createServer } from 'http';
@@ -21,6 +22,7 @@ import {
 import {
   PROVIDERS, getConfig, saveConfig, getSafeConfig, isConfigured,
 } from './lib/config.mjs';
+import { getSharedSellerPoolStatus, queueSharedSellerPoolSync, syncSharedSellerPool } from './lib/seller-pool.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
@@ -59,6 +61,7 @@ function broadcast(msg) {
 }
 
 const taskManager = new TaskManager(broadcast);
+await syncSharedSellerPool();
 let shuttingDown = false;
 
 async function gracefulShutdown(signal) {
@@ -88,6 +91,10 @@ app.get('/api/config', (req, res) => {
   res.json(getSafeConfig());
 });
 
+app.get('/api/seller-pool/status', (req, res) => {
+  res.json(getSharedSellerPoolStatus());
+});
+
 app.post('/api/config', (req, res) => {
   const { provider, apiKey, baseUrl, model, customModels, sellerBlacklist, sellerManualLabels, sellerLexicon, sellerFineRules, sellerProfiles } = req.body;
   const update = {};
@@ -103,6 +110,7 @@ app.post('/api/config', (req, res) => {
   if (sellerProfiles !== undefined) update.sellerProfiles = sellerProfiles;
 
   saveConfig(update);
+  if (sellerManualLabels !== undefined || sellerProfiles !== undefined) void queueSharedSellerPoolSync();
   broadcast({
     event: 'config:changed',
     data: { configured: isConfigured(), config: getSafeConfig() },
@@ -130,7 +138,7 @@ app.post('/api/sellers/label', (req, res) => {
       sellerFingerprint: fingerprint || existing.sellerFingerprint || '', sellerAvatarUrl: seller.sellerAvatarUrl || existing.sellerAvatarUrl || '',
       sellerLocation: seller.sellerLocation || existing.sellerLocation || '', sellerRating: seller.sellerRating || existing.sellerRating || '',
       sellerDealCount: seller.sellerDealCount ?? existing.sellerDealCount ?? null, sellerListedCount: seller.sellerListedCount ?? existing.sellerListedCount ?? null,
-      sellerType: label || existing.sellerType || '不明确', sellerManualLabel: label,
+      sellerType: label || existing.sellerType || '不明确', sellerManualLabel: label, sellerManualUpdatedAt: Date.now(),
       sellerProfileReason: label ? `人工标注：${label}` : (existing.sellerProfileReason || ''), checkedAt: Date.now(),
     };
     keys.forEach(key => {
@@ -139,6 +147,7 @@ app.post('/api/sellers/label', (req, res) => {
       sellerProfiles[key] = profile;
     });
     saveConfig({ sellerManualLabels, sellerProfiles });
+    void queueSharedSellerPoolSync();
     broadcast({ event: 'config:changed', data: { configured: isConfigured(), config: getSafeConfig() } });
     res.json({ ok: true, config: getSafeConfig() });
   } catch (err) {

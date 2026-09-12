@@ -7,12 +7,14 @@
     "start": "node scripts/start.mjs",
     "dev": "node --watch server.mjs",
     "stop": "node scripts/stop.mjs",
-    "reset:test-data": "node scripts/reset-test-data.mjs"
+    "reset:test-data": "node scripts/reset-test-data.mjs",
+    "migrate:seller-pool": "node scripts/migrate-seller-pool.mjs"
   },
   "engines": {
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "@libsql/client": "^0.18.0",
     "express": "^4.21.0",
     "playwright": "^1.49.0",
     "ws": "^8.18.0"
