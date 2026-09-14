@@ -20,7 +20,7 @@ import {
   getCurrentModel, setCurrentModel, getAvailableModels,
 } from './lib/ai.mjs';
 import {
-  PROVIDERS, getConfig, saveConfig, getSafeConfig, isConfigured,
+  PROVIDERS, getConfig, saveConfig, getSafeConfig, isConfigured, setSellerPoolRuntime,
 } from './lib/config.mjs';
 import { getSharedSellerPoolStatus, queueSharedSellerPoolSync, syncSharedSellerPool } from './lib/seller-pool.mjs';
 
@@ -62,6 +62,8 @@ function broadcast(msg) {
 
 const taskManager = new TaskManager(broadcast);
 await syncSharedSellerPool();
+// 卖家池只存在 Turso；清空旧 JSON 持久化字段，运行期间索引仅保存在内存。
+saveConfig({});
 let shuttingDown = false;
 
 async function gracefulShutdown(signal) {
@@ -93,6 +95,11 @@ app.get('/api/config', (req, res) => {
 
 app.get('/api/seller-pool/status', (req, res) => {
   res.json(getSharedSellerPoolStatus());
+});
+
+app.get('/api/seller-pool', async (req, res) => {
+  await syncSharedSellerPool();
+  res.json({ status: getSharedSellerPoolStatus(), config: getSafeConfig() });
 });
 
 app.post('/api/config', (req, res) => {
@@ -146,7 +153,7 @@ app.post('/api/sellers/label', (req, res) => {
       else delete sellerManualLabels[key];
       sellerProfiles[key] = profile;
     });
-    saveConfig({ sellerManualLabels, sellerProfiles });
+    setSellerPoolRuntime(sellerProfiles, sellerManualLabels);
     void queueSharedSellerPoolSync();
     broadcast({ event: 'config:changed', data: { configured: isConfigured(), config: getSafeConfig() } });
     res.json({ ok: true, config: getSafeConfig() });

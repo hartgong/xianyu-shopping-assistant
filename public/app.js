@@ -289,8 +289,11 @@ async function openMerchantPool() {
   document.getElementById('merchant-pool-search').value = '';
   // 即使浏览器错过 WebSocket 事件，也以服务端的卖家池为准，避免显示旧缓存。
   try {
-    const res = await fetch('/api/config');
-    if (res.ok) currentConfig = mergeSellerManualLabels(await res.json());
+    const res = await fetch('/api/seller-pool');
+    if (res.ok) {
+      const data = await res.json();
+      currentConfig = mergeSellerManualLabels(data.config || currentConfig);
+    }
   } catch { /* 保留当前缓存，页面仍可正常打开 */ }
   renderMerchantPool();
   document.getElementById('merchant-pool-modal-overlay').classList.add('show');
