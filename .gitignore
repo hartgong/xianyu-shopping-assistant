@@ -7,6 +7,8 @@ browser-data/
 data/config.json
 data/tasks.json
 data/seller-pool-cache.json
+data/tracked-products.json
+data/local-device.json
 
 # OS files
 .DS_Store

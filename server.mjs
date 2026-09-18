@@ -7,6 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { TaskManager } from './lib/task.mjs';
 import { closeBrowser } from './lib/browser.mjs';
+import { releaseContact } from './lib/contact-claims.mjs';
 import {
   addTrackedProduct,
   checkAllTrackedProducts,
@@ -285,6 +286,12 @@ app.post('/api/tasks/:id/chat', async (req, res) => {
   const result = await taskManager.startChat(req.params.id, req.body.productIds || [], updates);
   if (!result.ok) return res.status(400).json({ error: result.error });
   res.json({ ok: true });
+});
+
+app.post('/api/contact-claims/:productId/release', async (req, res) => {
+  const result = await releaseContact(req.params.productId);
+  if (!result.ok) return res.status(400).json(result);
+  res.json(result);
 });
 
 app.post('/api/tasks/:id/stop', (req, res) => {

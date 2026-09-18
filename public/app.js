@@ -1721,6 +1721,7 @@ function renderChats() {
           <span class="prompt-tag ${ps.hasProductContext ? 'on' : ''}">商品</span>
           <span class="prompt-tag ${ps.hasRequirements ? 'on' : ''}">需求</span>
           <span class="chat-msg-count">${s.messageCount || 0}条</span>
+          <button class="btn btn-sm" onclick="releaseContactClaim('${escapeHtml(s.id)}')" title="仅能释放本机占用；放弃该商品后，另一台电脑才可询价">释放占用</button>
           <span class="stage-badge stage-${statusCls}">${statusLabel}</span>
         </div>
       </div>
@@ -1746,6 +1747,16 @@ function renderChats() {
 
   const chatBoxes = container.querySelectorAll('.chat-messages');
   chatBoxes.forEach(box => { box.scrollTop = box.scrollHeight; });
+}
+
+async function releaseContactClaim(productId) {
+  if (!confirm('确认释放该商品的联系占用？释放后另一台电脑可以发起询价。')) return;
+  try {
+    const res = await fetch(`/api/contact-claims/${encodeURIComponent(productId)}/release`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || '无法释放；该占用可能属于另一台电脑');
+    alert('已释放联系占用。');
+  } catch (err) { alert('释放占用失败：' + err.message); }
 }
 
 function renderLogs() {
