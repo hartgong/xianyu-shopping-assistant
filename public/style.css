@@ -654,6 +654,9 @@ body {
 .merchant-evidence { max-width: 300px; color: var(--text2); font-size: 12px; white-space: normal; }
 .merchant-pool-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 14px; margin: 12px 0; }
 .merchant-pool-summary { color: var(--text2); font-size: 13px; }
+.merchant-pool-sync-status { color: var(--text3); font-size: 12px; margin-top: 5px; }
+.merchant-pool-sync-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+.merchant-pool-filter-toolbar { margin-top: 0; }
 .merchant-pool-filters { display: flex; gap: 6px; flex-wrap: wrap; }
 .merchant-pool-filters .btn.active { color: #fff; background: var(--accent); border-color: var(--accent); }
 .merchant-search-wrap { display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg3); }

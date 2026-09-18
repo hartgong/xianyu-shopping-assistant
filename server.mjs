@@ -22,7 +22,7 @@ import {
 import {
   PROVIDERS, getConfig, saveConfig, getSafeConfig, isConfigured, setSellerPoolRuntime,
 } from './lib/config.mjs';
-import { getSharedSellerPoolStatus, queueSharedSellerPoolSync, syncSharedSellerPool } from './lib/seller-pool.mjs';
+import { getSellerPoolConflicts, getSharedSellerPoolStatus, pullSharedSellerPool, pushSharedSellerPool, queueSharedSellerPoolSync, resolveSellerPoolConflict, syncSharedSellerPool } from './lib/seller-pool.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
@@ -61,8 +61,9 @@ function broadcast(msg) {
 }
 
 const taskManager = new TaskManager(broadcast);
+// 只读取本地 seller-pool-cache.json；启动服务不再访问 Turso。
 await syncSharedSellerPool();
-// 卖家池只存在 Turso；清空旧 JSON 持久化字段，运行期间索引仅保存在内存。
+// 卖家档案改用独立本地缓存文件，config.json 不再保存别名索引。
 saveConfig({});
 let shuttingDown = false;
 
@@ -98,8 +99,32 @@ app.get('/api/seller-pool/status', (req, res) => {
 });
 
 app.get('/api/seller-pool', async (req, res) => {
-  await syncSharedSellerPool();
   res.json({ status: getSharedSellerPoolStatus(), config: getSafeConfig() });
+});
+
+app.post('/api/seller-pool/pull', async (req, res) => {
+  const result = await pullSharedSellerPool();
+  if (!result.ok) return res.status(409).json(result);
+  broadcast({ event: 'config:changed', data: { configured: isConfigured(), config: getSafeConfig() } });
+  res.json({ ...result, status: getSharedSellerPoolStatus(), config: getSafeConfig() });
+});
+
+app.post('/api/seller-pool/push', async (req, res) => {
+  const result = await pushSharedSellerPool();
+  if (!result.ok) return res.status(500).json(result);
+  broadcast({ event: 'config:changed', data: { configured: isConfigured(), config: getSafeConfig() } });
+  res.json({ ...result, status: getSharedSellerPoolStatus(), config: getSafeConfig() });
+});
+
+app.get('/api/seller-pool/conflicts', (req, res) => {
+  res.json({ conflicts: getSellerPoolConflicts(), status: getSharedSellerPoolStatus() });
+});
+
+app.post('/api/seller-pool/conflicts/:sellerKey', (req, res) => {
+  const result = resolveSellerPoolConflict(req.params.sellerKey, req.body?.choice);
+  if (!result.ok) return res.status(400).json(result);
+  broadcast({ event: 'config:changed', data: { configured: isConfigured(), config: getSafeConfig() } });
+  res.json({ ...result, status: getSharedSellerPoolStatus(), config: getSafeConfig() });
 });
 
 app.post('/api/config', (req, res) => {

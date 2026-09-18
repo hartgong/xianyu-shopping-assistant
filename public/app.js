@@ -26,6 +26,7 @@ let merchantPoolPage = 1;
 let merchantPoolSearch = '';
 let merchantPoolFilter = 'all';
 let merchantPoolVisibleRows = [];
+let merchantPoolStatus = {};
 let selectedTrackedProductIds = new Set();
 const PRODUCT_PAGE_SIZE = 50;
 const TRACKER_PAGE_SIZE = 50;
@@ -287,16 +288,66 @@ async function openMerchantPool() {
   merchantPoolSearch = '';
   merchantPoolFilter = 'all';
   document.getElementById('merchant-pool-search').value = '';
-  // 即使浏览器错过 WebSocket 事件，也以服务端的卖家池为准，避免显示旧缓存。
+  // 此接口只读取服务端内存中的本地 JSON 副本，不访问 Turso。
   try {
     const res = await fetch('/api/seller-pool');
     if (res.ok) {
       const data = await res.json();
       currentConfig = mergeSellerManualLabels(data.config || currentConfig);
+      merchantPoolStatus = data.status || {};
     }
   } catch { /* 保留当前缓存，页面仍可正常打开 */ }
   renderMerchantPool();
   document.getElementById('merchant-pool-modal-overlay').classList.add('show');
+}
+
+async function pullMerchantPool() {
+  if (!confirm('从 Turso 下载最新卖家池到本机？本机存在待同步修改时会被阻止。')) return;
+  try {
+    const res = await fetch('/api/seller-pool/pull', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || '云端更新失败');
+    currentConfig = mergeSellerManualLabels(data.config || currentConfig);
+    merchantPoolStatus = data.status || data;
+    renderMerchantPool();
+  } catch (err) { alert('从云端更新失败：' + err.message); }
+}
+
+async function pushMerchantPool() {
+  if (!confirm('将本机待同步的卖家资料上传到 Turso？人工等级如与另一台电脑冲突，将被保留且不会自动覆盖。')) return;
+  try {
+    const res = await fetch('/api/seller-pool/push', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || '同步失败');
+    currentConfig = mergeSellerManualLabels(data.config || currentConfig);
+    merchantPoolStatus = data.status || data;
+    renderMerchantPool();
+    if (data.conflicts) alert(`已同步 ${data.pushed || 0} 项；有 ${data.conflicts} 项人工等级冲突，已保留本机和云端版本，未自动覆盖。`);
+  } catch (err) { alert('同步本机修改失败：' + err.message); }
+}
+
+async function resolveMerchantPoolConflicts() {
+  try {
+    const res = await fetch('/api/seller-pool/conflicts');
+    const data = await res.json();
+    const conflicts = data.conflicts || [];
+    if (!conflicts.length) return alert('目前没有需要处理的人工等级冲突。');
+    for (const item of conflicts) {
+      const seller = item.local?.sellerName || item.remote?.sellerName || item.sellerKey;
+      const localLevel = item.local?.sellerManualLabel || '未标记';
+      const cloudLevel = item.remote?.sellerManualLabel || '未标记';
+      const choice = prompt(`卖家「${seller}」的人工等级发生冲突。\n本机：${localLevel}\n云端：${cloudLevel}\n\n输入 local 保留本机，输入 cloud 采用云端；取消可稍后处理。`, '');
+      if (choice === null) break;
+      const normalized = String(choice).trim().toLowerCase();
+      if (!['local', 'cloud'].includes(normalized)) { alert('未处理：请输入 local 或 cloud。'); continue; }
+      const result = await fetch(`/api/seller-pool/conflicts/${encodeURIComponent(item.sellerKey)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ choice: normalized }) });
+      const resolved = await result.json();
+      if (!result.ok || !resolved.ok) throw new Error(resolved.error || '处理冲突失败');
+      currentConfig = mergeSellerManualLabels(resolved.config || currentConfig);
+      merchantPoolStatus = resolved.status || merchantPoolStatus;
+    }
+    renderMerchantPool();
+  } catch (err) { alert('处理冲突失败：' + err.message); }
 }
 
 function hideMerchantPool() {
@@ -378,6 +429,11 @@ function renderMerchantPool() {
   merchantPoolVisibleRows = pageRows;
   const summary = document.getElementById('merchant-pool-summary');
   if (summary) summary.textContent = `共 ${allProfiles.length} 个卖家 · 小B ${levelCounts['小B']} · 个人 ${levelCounts['个人卖家']} · 疑似小B ${levelCounts['疑似小B']} · 不明确 ${levelCounts['不明确']}${query ? ` · 搜索结果 ${rows.length}` : ''}`;
+  const syncStatus = document.getElementById('merchant-pool-sync-status');
+  if (syncStatus) {
+    const updated = merchantPoolStatus.updatedAt ? new Date(merchantPoolStatus.updatedAt).toLocaleString('zh-CN', { hour12: false }) : '尚未从云端下载';
+    syncStatus.textContent = `本机副本：${updated} · 待同步 ${merchantPoolStatus.pending || 0} 项${merchantPoolStatus.conflicts ? ` · 冲突 ${merchantPoolStatus.conflicts} 项` : ''}`;
+  }
   [['all', 'merchant-filter-all'], ['小B', 'merchant-filter-confirmed'], ['个人卖家', 'merchant-filter-personal'], ['疑似小B', 'merchant-filter-suspected'], ['疑似个人卖家', 'merchant-filter-suspected-personal'], ['不明确', 'merchant-filter-unknown']].forEach(([filter, id]) => {
     document.getElementById(id)?.classList.toggle('active', merchantPoolFilter === filter);
   });

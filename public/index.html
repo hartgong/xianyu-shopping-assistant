@@ -265,7 +265,14 @@
       <div class="modal-body">
         <p class="settings-desc">跨任务沉淀的闲鱼卖家档案。每个已采集商品的卖家都会进入此处，不会额外访问闲鱼。</p>
         <div class="merchant-pool-toolbar">
-          <div class="merchant-pool-summary" id="merchant-pool-summary"></div>
+          <div><div class="merchant-pool-summary" id="merchant-pool-summary"></div><div class="merchant-pool-sync-status" id="merchant-pool-sync-status"></div></div>
+          <div class="merchant-pool-sync-actions">
+            <button class="btn btn-sm" type="button" onclick="pullMerchantPool()">从云端更新</button>
+            <button class="btn btn-sm btn-primary" type="button" onclick="pushMerchantPool()">同步本机修改</button>
+            <button class="btn btn-sm" type="button" onclick="resolveMerchantPoolConflicts()">处理冲突</button>
+          </div>
+        </div>
+        <div class="merchant-pool-toolbar merchant-pool-filter-toolbar">
           <div class="merchant-pool-filters">
             <button class="btn btn-sm" id="merchant-filter-all" onclick="setMerchantPoolFilter('all')">全部</button>
             <button class="btn btn-sm" id="merchant-filter-confirmed" onclick="setMerchantPoolFilter('小B')">小B</button>
